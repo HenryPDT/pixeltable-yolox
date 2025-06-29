@@ -102,10 +102,10 @@ class YoloxConfig:
     print_interval: int = 10
     # eval period in epoch, for example,
     # if set to 1, model will be evaluate after every epoch.
-    eval_interval: int = 10
+    eval_interval: int = 1
     # save history checkpoint or not.
     # If set to False, yolox will only save latest and best ckpt.
-    save_history_ckpt: bool = True
+    save_history_ckpt: bool = False
 
     # -----------------  testing config ------------------ #
     # output image size during evaluation/test

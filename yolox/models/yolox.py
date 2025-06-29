@@ -115,7 +115,7 @@ class YoloxModule(nn.Module):
         model.eval()
         model.head.training = False
         model.training = False
-        weights = torch.load(path, map_location=torch.device(device))
+        weights = torch.load(path, map_location=torch.device(device), weights_only=False)
         model.load_state_dict(weights['model'])
         return model
 

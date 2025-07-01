@@ -19,6 +19,7 @@ from yolox.utils import (
     WandbLogger,
     adjust_status,
     all_reduce_norm,
+    analyze_dataset_stats,
     get_local_rank,
     get_model_info,
     get_rank,
@@ -26,6 +27,7 @@ from yolox.utils import (
     gpu_mem_usage,
     is_parallel,
     load_ckpt,
+    log_dataset_stats,
     mem_usage,
     occupy_mem,
     save_checkpoint,
@@ -177,6 +179,19 @@ class Trainer:
         self.evaluator = self.exp.get_evaluator(
             batch_size=self.args.batch_size, is_distributed=self.is_distributed
         )
+        
+        # Log dataset statistics only on main process
+        if self.rank == 0:
+            # Analyze and log training dataset statistics
+            train_dataset = self.train_loader.dataset
+            train_stats = analyze_dataset_stats(train_dataset, "Training Dataset")
+            log_dataset_stats(train_stats, "Training Dataset")
+            
+            # Analyze and log validation dataset statistics
+            val_dataset = self.evaluator.dataloader.dataset
+            val_stats = analyze_dataset_stats(val_dataset, "Validation Dataset")
+            log_dataset_stats(val_stats, "Validation Dataset")
+        
         # Tensorboard and Wandb loggers
         if self.rank == 0:
             if self.args.logger == "tensorboard":

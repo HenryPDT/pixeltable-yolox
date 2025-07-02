@@ -43,6 +43,8 @@ dependencies = [
     "pycocotools (==2.0.8)",
     "onnx (>=1.17.0)",
     "onnxsim (>=0.4.10)",
+    "onnxslim (>=0.1.58)",
+    "onnxruntime (>=1.22.0)",
 ]
 
 [project.urls]

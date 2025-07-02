@@ -6,7 +6,7 @@ import torch.nn as nn
 # Imports from the pixeltable-yolox library
 from yolox.models import YoloxModule
 from yolox.config import YoloxConfig
-from yolox.cli.utils import resolve_config, parse_model_config_opts
+from yolox.cli.utils import resolve_config
 from yolox.utils import replace_module
 from yolox.models.network_blocks import SiLU
 
@@ -27,16 +27,39 @@ class DeepStreamOutput(nn.Module):
         return torch.cat([boxes, scores, labels.to(boxes.dtype)], dim=-1)
 
 
-def yolox_export(weights: str, config_str: str, opts: dict | None = None) -> (nn.Module, YoloxConfig):
+def yolox_export(weights: str, config_str: str) -> (nn.Module, YoloxConfig):
     """
     Loads a pixeltable-yolox model and prepares it for ONNX export.
     """
     config = resolve_config(config_str)
-    # Apply runtime overrides to the config BEFORE creating the model
-    if opts:
-        config.update(opts)
+    
+    # Load the checkpoint to detect num_classes before creating the model
+    print('Loading checkpoint to detect model configuration...')
+    checkpoint = torch.load(weights, map_location='cpu', weights_only=False)
+    
+    # Extract num_classes from the checkpoint by looking at the classification head
+    # The cls_preds layers have shape [num_classes, ...], so we can get num_classes from there
+    model_state = checkpoint.get('model', checkpoint)
+    
+    # Look for the first classification prediction layer to get num_classes
+    cls_pred_key = None
+    for key in model_state.keys():
+        if 'head.cls_preds.0.weight' in key:
+            cls_pred_key = key
+            break
+    
+    if cls_pred_key is None:
+        raise ValueError("Could not find classification prediction layer in checkpoint to detect num_classes")
+    
+    # Get num_classes from the shape of the classification layer
+    detected_num_classes = model_state[cls_pred_key].shape[0]
+    print(f'Auto-detected num_classes: {detected_num_classes}')
+    
+    # Update config with detected num_classes before creating the model
+    config.num_classes = detected_num_classes
 
     model = YoloxModule.from_pretrained(weights, config)
+    
     model.eval()
     model = replace_module(model, nn.SiLU, SiLU)
     model.head.decode_in_inference = True
@@ -60,11 +83,8 @@ def main(args):
 
     print('Opening YOLOX model')
 
-    # Parse the -D options from the command line
-    opts = parse_model_config_opts(args.D)
-
     device = torch.device('cpu')
-    model, config = yolox_export(args.weights, args.config, opts)
+    model, config = yolox_export(args.weights, args.config)
 
     # Wrap the model with the custom output layer
     model = nn.Sequential(model, DeepStreamOutput())
@@ -72,7 +92,7 @@ def main(args):
 
     img_size = config.input_size
     print(f'Using input size: {img_size}')
-    print(f'Model has {config.num_classes} classes.') # You can add this to verify
+    print(f'Model has {config.num_classes} classes.')
 
     onnx_input_im = torch.zeros(args.batch, 3, *img_size).to(device)
     onnx_output_file = f'{os.path.splitext(args.weights)[0]}.onnx'
@@ -120,7 +140,6 @@ def parse_args():
     parser.add_argument('--simplify', action='store_true', help='Simplify the ONNX model using onnxslim')
     parser.add_argument('--dynamic', action='store_true', help='Enable dynamic batch size in the ONNX model')
     parser.add_argument('--batch', type=int, default=1, help='Static batch size for the ONNX model')
-    parser.add_argument('-D', type=str, metavar="OPT=VALUE", help="Override model configuration option (e.g., -D num_classes=5)", action="append")
     
     args = parser.parse_args()
     if not os.path.isfile(args.weights):

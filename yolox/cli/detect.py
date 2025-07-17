@@ -21,19 +21,79 @@ from yolox.utils import (
     vis,
 )
 
-from .utils import resolve_config
+from .utils import resolve_config, get_unique_output_name
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
+VIDEO_EXT = [".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v"]
+
+
+def is_image_file(filepath):
+    """Check if a file is an image based on its extension."""
+    ext = os.path.splitext(filepath)[1].lower()
+    return ext in IMAGE_EXT
+
+
+def is_video_file(filepath):
+    """Check if a file is a video based on its extension."""
+    ext = os.path.splitext(filepath)[1].lower()
+    return ext in VIDEO_EXT
+
+
+def detect_input_type(path):
+    """Automatically detect the type of input (image, video, folder, or webcam)."""
+    if path is None:
+        return "webcam"
+    
+    if not os.path.exists(path):
+        logger.error(f"Path {path} does not exist.")
+        return None
+    
+    if os.path.isfile(path):
+        if is_image_file(path):
+            return "image"
+        elif is_video_file(path):
+            return "video"
+        else:
+            logger.error(f"Unsupported file type: {path}")
+            return None
+    elif os.path.isdir(path):
+        return "folder"
+    else:
+        logger.error(f"Path {path} is neither a file nor a directory.")
+        return None
+
+
+def get_file_list(path):
+    """Get all image and video files from a directory, sorted by type."""
+    image_files = []
+    video_files = []
+    
+    for maindir, _, file_name_list in os.walk(path):
+        for filename in file_name_list:
+            apath = os.path.join(maindir, filename)
+            if is_image_file(apath):
+                image_files.append(apath)
+            elif is_video_file(apath):
+                video_files.append(apath)
+    
+    image_files.sort()
+    video_files.sort()
+    
+    return image_files, video_files
 
 
 def make_parser():
     parser = argparse.ArgumentParser("yolox detect")
     parser.add_argument(
-        "type", choices=["image", "video", "webcam"], help="type of detection"
+        "type", 
+        nargs='?',  # Make type optional
+        choices=["image", "video", "webcam", "auto"], 
+        default="auto",
+        help="type of detection (auto-detect if not specified)"
     )
     parser.add_argument("-c", "--config", required=True, type=str, help="A builtin config such as yolox-s")
     parser.add_argument("--ckpt", default=None, type=str, help="path to checkpoint file")
-    parser.add_argument("--path", help="path to images/video. For webcam, this is ignored.")
+    parser.add_argument("--path", help="path to images/video/folder. For webcam, this is ignored.")
     parser.add_argument("--camid", type=int, default=0, help="webcam camera id")
     parser.add_argument(
         "--save_result",
@@ -95,6 +155,47 @@ def get_image_list(path):
             if ext in IMAGE_EXT:
                 image_names.append(apath)
     return image_names
+
+
+def process_mixed_content(predictor, folder_path, args, config):
+    """Process a folder containing both images and videos."""
+    image_files, video_files = get_file_list(folder_path)
+    
+    logger.info(f"Found {len(image_files)} image files and {len(video_files)} video files")
+    
+    # Process images first
+    if image_files:
+        logger.info("Processing images...")
+        for image_name in image_files:
+            outputs, img_info = predictor.inference(image_name)
+            result_image = predictor.visual(outputs[0], img_info, predictor.confthre)
+            if args.save_result:
+                save_folder = os.path.join(config.output_dir, args.experiment_name, "images")
+                os.makedirs(save_folder, exist_ok=True)
+                save_file_name = os.path.join(save_folder, os.path.basename(image_name))
+                logger.info("Saving detection result in {}", save_file_name)
+                cv2.imwrite(save_file_name, result_image)
+            else:
+                cv2.imshow(os.path.basename(image_name), result_image)
+                ch = cv2.waitKey(0)
+                if ch == 27 or ch == ord("q") or ch == ord("Q"):
+                    break
+    
+    # Process videos
+    if video_files:
+        logger.info("Processing videos...")
+        for video_path in video_files:
+            logger.info(f"Processing video: {video_path}")
+            # Create a temporary args object for video processing
+            temp_args = type('Args', (), {
+                'type': 'video',
+                'path': video_path,
+                'save_result': args.save_result,
+                'camid': args.camid
+            })()
+            
+            # Process the video
+            imageflow_demo(predictor, os.path.join(config.output_dir, args.experiment_name, "videos"), temp_args)
 
 
 class Predictor:
@@ -219,6 +320,15 @@ def main(argv: list[str]) -> None:
 
     config = resolve_config(args.config)
 
+    # Set output directory to out/detect and auto-increment experiment name if exists
+    if not hasattr(args, 'name') or args.name is None:
+        args.name = config.name if hasattr(config, 'name') else args.config
+    base_output_dir = os.path.join("out", "detect")
+    os.makedirs(base_output_dir, exist_ok=True)
+    output_dir, experiment_name = get_unique_output_name(base_output_dir, args.name)
+    config.output_dir = output_dir
+    args.experiment_name = experiment_name
+
     # --- Begin: Load custom labels if provided ---
     custom_labels = None
     if args.labels is not None:
@@ -284,6 +394,15 @@ def main(argv: list[str]) -> None:
         legacy=args.legacy,
     )
 
+    # Auto-detect input type if not specified or set to auto
+    if args.type == "auto" or args.type is None:
+        input_type = detect_input_type(args.path)
+        if input_type is None:
+            sys.exit(1)
+        logger.info(f"Auto-detected input type: {input_type}")
+        args.type = input_type
+    
+    # Process based on detected or specified type
     if args.type == "image":
         if os.path.isdir(args.path):
             files = get_image_list(args.path)
@@ -294,7 +413,7 @@ def main(argv: list[str]) -> None:
             outputs, img_info = predictor.inference(image_name)
             result_image = predictor.visual(outputs[0], img_info, predictor.confthre)
             if args.save_result:
-                save_folder = os.path.join(config.output_dir, args.config)
+                save_folder = os.path.join(config.output_dir, args.experiment_name)
                 os.makedirs(save_folder, exist_ok=True)
                 save_file_name = os.path.join(save_folder, os.path.basename(image_name))
                 logger.info("Saving detection result in {}", save_file_name)
@@ -304,8 +423,12 @@ def main(argv: list[str]) -> None:
                 ch = cv2.waitKey(0)
                 if ch == 27 or ch == ord("q") or ch == ord("Q"):
                     break
-    elif args.type in ["video", "webcam"]:
-        imageflow_demo(predictor, os.path.join(config.output_dir, args.config), args)
+    elif args.type == "video":
+        imageflow_demo(predictor, os.path.join(config.output_dir, args.experiment_name), args)
+    elif args.type == "webcam":
+        imageflow_demo(predictor, os.path.join(config.output_dir, args.experiment_name), args)
+    elif args.type == "folder":
+        process_mixed_content(predictor, args.path, args, config)
 
 if __name__ == "__main__":
     main(sys.argv[1:])

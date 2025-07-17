@@ -15,7 +15,7 @@ from yolox.config import YoloxConfig
 from yolox.core import launch
 from yolox.utils import configure_module, configure_nccl, fuse_model, get_local_rank, get_model_info, setup_logger
 
-from .utils import parse_model_config_opts, resolve_config
+from .utils import parse_model_config_opts, resolve_config, get_unique_output_name
 
 
 def make_parser():
@@ -196,6 +196,13 @@ def main(argv: list[str]) -> None:
 
     if not args.name:
         args.name = config.name
+
+    # Set output directory to out/eval and auto-increment experiment name if exists
+    base_output_dir = os.path.join("out", "eval")
+    os.makedirs(base_output_dir, exist_ok=True)
+    output_dir, experiment_name = get_unique_output_name(base_output_dir, args.name)
+    config.output_dir = output_dir
+    args.experiment_name = experiment_name
 
     num_gpu = torch.cuda.device_count() if args.devices is None else args.devices
     assert num_gpu <= torch.cuda.device_count()

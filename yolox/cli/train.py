@@ -14,36 +14,7 @@ from yolox.config import YoloxConfig
 from yolox.core import launch
 from yolox.utils import configure_module, configure_nccl, configure_omp, get_num_devices
 
-from .utils import parse_model_config_opts, resolve_config
-
-
-def get_unique_output_name(base_dir, name):
-    """
-    Generate a unique output directory name to avoid overwriting existing experiments.
-    
-    Args:
-        base_dir (str): Base output directory (e.g., "out")
-        name (str): Desired experiment name
-        
-    Returns:
-        tuple: (full_output_dir, experiment_name)
-            - full_output_dir: Complete path like "out/custom_train" 
-            - experiment_name: Final experiment name like "custom_train" or "yolox_s_2"
-    """
-    full_path = os.path.join(base_dir, name)
-    
-    # If the directory doesn't exist, use the original name
-    if not os.path.exists(full_path):
-        return base_dir, name
-    
-    # Directory exists, find a unique name with increment
-    counter = 2
-    while True:
-        new_name = f"{name}_{counter}"
-        new_path = os.path.join(base_dir, new_name)
-        if not os.path.exists(new_path):
-            return base_dir, new_name
-        counter += 1
+from .utils import parse_model_config_opts, resolve_config, get_unique_output_name
 
 
 def make_parser():
@@ -333,14 +304,17 @@ def main(argv: list[str]) -> None:
     # Handle output directory logic
     if args.output_dir is not None:
         # User specified a custom output directory name
-        # We want: out/{custom_name} instead of {custom_name}/{model_name}
-        base_output_dir = "out"
+        # We want: out/train/{custom_name} instead of out/{custom_name}
+        base_output_dir = os.path.join("out", "train")
+        os.makedirs(base_output_dir, exist_ok=True)
         output_dir, experiment_name = get_unique_output_name(base_output_dir, args.output_dir)
         config.output_dir = output_dir
         args.name = experiment_name
     else:
         # No custom output dir specified, use default behavior with auto-increment
-        base_output_dir = config.output_dir  # Default is "./out"
+        # We want: out/train/{model_name} instead of out/{model_name}
+        base_output_dir = os.path.join("out", "train")
+        os.makedirs(base_output_dir, exist_ok=True)
         output_dir, experiment_name = get_unique_output_name(base_output_dir, args.name)
         config.output_dir = output_dir
         args.name = experiment_name

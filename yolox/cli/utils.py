@@ -1,4 +1,5 @@
 import importlib
+import os
 from typing import Optional
 
 from yolox.config import YoloxConfig
@@ -42,3 +43,26 @@ def parse_model_config_opts(kv_opts: Optional[list[str]]) -> dict[str, str]:
         key, value = kv.split("=", 1)
         kv_dict[key] = value
     return kv_dict
+
+
+def get_unique_output_name(base_dir, name):
+    """
+    Generate a unique output directory name to avoid overwriting existing experiments.
+    Args:
+        base_dir (str): Base output directory (e.g., "out")
+        name (str): Desired experiment name
+    Returns:
+        tuple: (full_output_dir, experiment_name)
+            - full_output_dir: Complete path like "out/custom_train"
+            - experiment_name: Final experiment name like "custom_train" or "yolox_s_2"
+    """
+    full_path = os.path.join(base_dir, name)
+    if not os.path.exists(full_path):
+        return base_dir, name
+    counter = 2
+    while True:
+        new_name = f"{name}_{counter}"
+        new_path = os.path.join(base_dir, new_name)
+        if not os.path.exists(new_path):
+            return base_dir, new_name
+        counter += 1

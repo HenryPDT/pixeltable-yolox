@@ -90,17 +90,26 @@ def main(args):
     model = nn.Sequential(model, DeepStreamOutput())
     model.to(device)
 
-    img_size = config.input_size
+    # Use custom image size if provided, otherwise use config default
+    img_size = args.imgsz if args.imgsz else config.input_size
     print(f'Using input size: {img_size}')
     print(f'Model has {config.num_classes} classes.')
 
     onnx_input_im = torch.zeros(args.batch, 3, *img_size).to(device)
     onnx_output_file = f'{os.path.splitext(args.weights)[0]}.onnx'
 
-    dynamic_axes = {
-        'input': {0: 'batch'},
-        'output': {0: 'batch'}
-    } if args.dynamic else None
+    # Set dynamic_axes according to the selected flag
+    dynamic_axes = None
+    if args.dynamic:
+        dynamic_axes = {
+            'input': {0: 'batch'},
+            'output': {0: 'batch'}
+        }
+    elif args.dynamic_shape:
+        dynamic_axes = {
+            'input': {2: 'height', 3: 'width'},
+            'output': {0: 'batch'}
+        }
 
     print(f'Exporting the model to ONNX at {onnx_output_file}')
     torch.onnx.export(
@@ -136,16 +145,37 @@ def parse_args():
     parser = argparse.ArgumentParser(description='DeepStream YOLOX conversion for pixeltable-yolox')
     parser.add_argument('-w', '--weights', required=True, help='Input weights (.pth) file path (required)')
     parser.add_argument('-cfg', '--config', required=True, help='YOLOX model config name (e.g., yolox-s) or path to a custom config class (required)')
+    parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, help='Image size (height, width) for ONNX export (default: use config input_size)')
     parser.add_argument('--opset', type=int, default=11, help='ONNX opset version')
     parser.add_argument('--simplify', action='store_true', help='Simplify the ONNX model using onnxslim')
     parser.add_argument('--dynamic', action='store_true', help='Enable dynamic batch size in the ONNX model')
+    parser.add_argument('--dynamic-shape', action='store_true', help='Enable dynamic input size (height/width) in the ONNX model')
     parser.add_argument('--batch', type=int, default=1, help='Static batch size for the ONNX model')
     
     args = parser.parse_args()
     if not os.path.isfile(args.weights):
         raise SystemExit(f'Invalid weights file: {args.weights}')
+    
+    # Process imgsz argument
+    if args.imgsz:
+        if len(args.imgsz) == 1:
+            args.imgsz = (args.imgsz[0], args.imgsz[0])  # square
+        elif len(args.imgsz) == 2:
+            args.imgsz = tuple(args.imgsz)  # (height, width)
+        else:
+            raise SystemExit('--imgsz must be 1 or 2 integers (height, width)')
+    
+    # Ensure only one dynamic flag is set
+    dynamic_flags = [args.dynamic, args.dynamic_shape]
+    if sum(dynamic_flags) > 1:
+        raise SystemExit('Only one of --dynamic or --dynamic-shape can be set at a time.')
     if args.dynamic and args.batch > 1:
-        raise SystemExit('Cannot set --dynamic and --batch > 1 at the same time.')
+        raise SystemExit('Cannot set --dynamic with --batch > 1 at the same time.')
+    
+    # Validate imgsz and dynamic-shape compatibility
+    if args.imgsz and args.dynamic_shape:
+        raise SystemExit('Cannot set --imgsz with --dynamic-shape. Use either fixed input size (--imgsz) or dynamic input size (--dynamic-shape), not both.')
+    
     return args
 
 

@@ -178,6 +178,11 @@ Examples:
         "--num-classes", type=int, default=None,
         help="Number of classes (default: 80)"
     )
+    # Add --imgsz argument
+    data_group.add_argument(
+        "--imgsz", type=int, nargs='+', default=None,
+        help="Input image size. Provide one value for square (e.g., 640) or two for (height width), e.g., 96 256. Overrides --input-size if set."
+    )
     data_group.add_argument(
         "--input-size", type=str, default=None,
         help="Input size as 'height,width' (default: 640,640)"
@@ -268,7 +273,17 @@ def convert_args_to_config_opts(args):
         config_opts['data_dir'] = args.data_dir
     if args.num_classes is not None:
         config_opts['num_classes'] = str(args.num_classes)
-    if args.input_size is not None:
+    # Handle imgsz and input_size precedence
+    if args.imgsz is not None:
+        # Accept one or two ints
+        if len(args.imgsz) == 1:
+            h = w = int(args.imgsz[0])
+        elif len(args.imgsz) == 2:
+            h, w = map(int, args.imgsz)
+        else:
+            raise ValueError(f"--imgsz expects 1 or 2 values, got {args.imgsz}")
+        config_opts['input_size'] = f'({h}, {w})'
+    elif args.input_size is not None:
         # Parse input size from 'height,width' format
         try:
             height, width = map(int, args.input_size.split(','))

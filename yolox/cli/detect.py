@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import sys
 import time
 from loguru import logger
 
@@ -9,41 +10,36 @@ import cv2
 
 import torch
 
+from yolox.config import YoloxConfig
 from yolox.data.data_augment import ValTransform
 from yolox.data.datasets import COCO_CLASSES
-from yolox.exp import get_exp
-from yolox.utils import fuse_model, get_model_info, postprocess, vis
+from yolox.utils import (
+    configure_module,
+    fuse_model,
+    get_model_info,
+    postprocess,
+    vis,
+)
+
+from .utils import resolve_config
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
 
 
 def make_parser():
-    parser = argparse.ArgumentParser("yolox demo")
+    parser = argparse.ArgumentParser("yolox detect")
     parser.add_argument(
-        "demo", default="image", help="demo type, eg. image, video and webcam"
+        "type", choices=["image", "video", "webcam"], help="type of detection"
     )
-    parser.add_argument("-expn", "--experiment-name", type=str, default=None)
-    parser.add_argument("-n", "--name", type=str, default=None, help="model name")
-
-    parser.add_argument(
-        "--path", default="./assets/dog.jpg", help="path to images or video"
-    )
-    parser.add_argument("--camid", type=int, default=0, help="webcam demo camera id")
+    parser.add_argument("-c", "--config", required=True, type=str, help="A builtin config such as yolox-s")
+    parser.add_argument("--ckpt", default=None, type=str, help="path to checkpoint file")
+    parser.add_argument("--path", help="path to images/video. For webcam, this is ignored.")
+    parser.add_argument("--camid", type=int, default=0, help="webcam camera id")
     parser.add_argument(
         "--save_result",
         action="store_true",
         help="whether to save the inference result of image/video",
     )
-
-    # exp file
-    parser.add_argument(
-        "-f",
-        "--exp_file",
-        default=None,
-        type=str,
-        help="please input your experiment description file",
-    )
-    parser.add_argument("-c", "--ckpt", default=None, type=str, help="ckpt for eval")
     parser.add_argument(
         "--device",
         default="cpu",
@@ -81,12 +77,18 @@ def make_parser():
         action="store_true",
         help="Using TensorRT model for testing.",
     )
+    parser.add_argument(
+        "--labels",
+        type=str,
+        default=None,
+        help="Path to a text file containing class labels (one per line). Overrides default COCO labels.",
+    )
     return parser
 
 
 def get_image_list(path):
     image_names = []
-    for maindir, subdir, file_name_list in os.walk(path):
+    for maindir, _, file_name_list in os.walk(path):
         for filename in file_name_list:
             apath = os.path.join(maindir, filename)
             ext = os.path.splitext(apath)[1]
@@ -95,11 +97,11 @@ def get_image_list(path):
     return image_names
 
 
-class Predictor(object):
+class Predictor:
     def __init__(
         self,
         model,
-        exp,
+        config: YoloxConfig,
         cls_names=COCO_CLASSES,
         trt_file=None,
         decoder=None,
@@ -110,10 +112,10 @@ class Predictor(object):
         self.model = model
         self.cls_names = cls_names
         self.decoder = decoder
-        self.num_classes = exp.num_classes
-        self.confthre = exp.test_conf
-        self.nmsthre = exp.nmsthre
-        self.test_size = exp.test_size
+        self.num_classes = config.num_classes
+        self.confthre = config.test_conf
+        self.nmsthre = config.nmsthre
+        self.test_size = config.test_size
         self.device = device
         self.fp16 = fp16
         self.preproc = ValTransform(legacy=legacy)
@@ -123,7 +125,7 @@ class Predictor(object):
             model_trt = TRTModule()
             model_trt.load_state_dict(torch.load(trt_file))
 
-            x = torch.ones(1, 3, exp.test_size[0], exp.test_size[1]).cuda()
+            x = torch.ones(1, 3, config.test_size[0], config.test_size[1]).cuda()
             self.model(x)
             self.model = model_trt
 
@@ -160,7 +162,7 @@ class Predictor(object):
                 outputs, self.num_classes, self.confthre,
                 self.nmsthre, class_agnostic=True
             )
-            logger.info("Infer time: {:.4f}s".format(time.time() - t0))
+            logger.info("Infer time: {:.4f}s", time.time() - t0)
         return outputs, img_info
 
     def visual(self, output, img_info, cls_conf=0.35):
@@ -171,8 +173,6 @@ class Predictor(object):
         output = output.cpu()
 
         bboxes = output[:, 0:4]
-
-        # preprocessing: resize
         bboxes /= ratio
 
         cls = output[:, 6]
@@ -181,43 +181,17 @@ class Predictor(object):
         vis_res = vis(img, bboxes, scores, cls, cls_conf, self.cls_names)
         return vis_res
 
-
-def image_demo(predictor, vis_folder, path, current_time, save_result):
-    if os.path.isdir(path):
-        files = get_image_list(path)
-    else:
-        files = [path]
-    files.sort()
-    for image_name in files:
-        outputs, img_info = predictor.inference(image_name)
-        result_image = predictor.visual(outputs[0], img_info, predictor.confthre)
-        if save_result:
-            save_folder = os.path.join(
-                vis_folder, time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
-            )
-            os.makedirs(save_folder, exist_ok=True)
-            save_file_name = os.path.join(save_folder, os.path.basename(image_name))
-            logger.info("Saving detection result in {}".format(save_file_name))
-            cv2.imwrite(save_file_name, result_image)
-        ch = cv2.waitKey(0)
-        if ch == 27 or ch == ord("q") or ch == ord("Q"):
-            break
-
-
-def imageflow_demo(predictor, vis_folder, current_time, args):
-    cap = cv2.VideoCapture(args.path if args.demo == "video" else args.camid)
-    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)  # float
-    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)  # float
+def imageflow_demo(predictor, vis_folder, args):
+    cap = cv2.VideoCapture(args.path if args.type == "video" else args.camid)
+    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
     fps = cap.get(cv2.CAP_PROP_FPS)
     if args.save_result:
-        save_folder = os.path.join(
-            vis_folder, time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
-        )
-        os.makedirs(save_folder, exist_ok=True)
-        if args.demo == "video":
-            save_path = os.path.join(save_folder, os.path.basename(args.path))
+        os.makedirs(vis_folder, exist_ok=True)
+        if args.type == "video":
+            save_path = os.path.join(vis_folder, os.path.basename(args.path))
         else:
-            save_path = os.path.join(save_folder, "camera.mp4")
+            save_path = os.path.join(vis_folder, "camera.mp4")
         logger.info(f"video save_path is {save_path}")
         vid_writer = cv2.VideoWriter(
             save_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (int(width), int(height))
@@ -239,80 +213,99 @@ def imageflow_demo(predictor, vis_folder, current_time, args):
             break
 
 
-def main(exp, args):
-    if not args.experiment_name:
-        args.experiment_name = exp.exp_name
+def main(argv: list[str]) -> None:
+    configure_module()
+    args = make_parser().parse_args(argv)
 
-    file_name = os.path.join(exp.output_dir, args.experiment_name)
-    os.makedirs(file_name, exist_ok=True)
+    config = resolve_config(args.config)
 
-    vis_folder = None
-    if args.save_result:
-        vis_folder = os.path.join(file_name, "vis_res")
-        os.makedirs(vis_folder, exist_ok=True)
+    # --- Begin: Load custom labels if provided ---
+    custom_labels = None
+    if args.labels is not None:
+        if not os.path.isfile(args.labels):
+            logger.error(f"Label file {args.labels} does not exist.")
+            sys.exit(1)
+        with open(args.labels, 'r') as f:
+            custom_labels = [line.strip() for line in f if line.strip()]
+        logger.info(f"Loaded {len(custom_labels)} custom labels from {args.labels}")
+    # --- End: Load custom labels if provided ---
 
-    if args.trt:
-        args.device = "gpu"
-
-    logger.info("Args: {}".format(args))
+    # --- Begin: Auto-detect num_classes from checkpoint if provided ---
+    if args.ckpt is not None:
+        import torch
+        ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+        model_state = ckpt.get('model', ckpt)
+        cls_pred_key = None
+        for key in model_state.keys():
+            if 'head.cls_preds.0.weight' in key:
+                cls_pred_key = key
+                break
+        if cls_pred_key is not None:
+            detected_num_classes = model_state[cls_pred_key].shape[0]
+            config.num_classes = detected_num_classes
+            logger.info(f"Auto-detected num_classes from checkpoint: {detected_num_classes}")
+        else:
+            logger.warning("Could not auto-detect num_classes from checkpoint; using config default.")
+    # --- End: Auto-detect num_classes from checkpoint ---
 
     if args.conf is not None:
-        exp.test_conf = args.conf
+        config.test_conf = args.conf
     if args.nms is not None:
-        exp.nmsthre = args.nms
+        config.nmsthre = args.nms
     if args.tsize is not None:
-        exp.test_size = (args.tsize, args.tsize)
+        config.test_size = (args.tsize, args.tsize)
 
-    model = exp.get_model()
-    logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
+    model = config.get_model()
+    logger.info("Model Summary: {}", get_model_info(model, config.test_size))
 
     if args.device == "gpu":
         model.cuda()
         if args.fp16:
-            model.half()  # to FP16
+            model.half()
     model.eval()
 
-    if not args.trt:
-        if args.ckpt is None:
-            ckpt_file = os.path.join(file_name, "best_ckpt.pth")
-        else:
-            ckpt_file = args.ckpt
-        logger.info("loading checkpoint")
-        ckpt = torch.load(ckpt_file, map_location="cpu")
-        # load the model state dict
-        model.load_state_dict(ckpt["model"])
-        logger.info("loaded checkpoint done.")
+    if args.ckpt is None:
+        from yolox.models.yolox import YoloxModule
+        model = YoloxModule.from_pretrained(args.config, config, args.device)
+    else:
+        logger.info("loading checkpoint from {}", args.ckpt)
+        ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+        model.load_state_dict(ckpt.get("model", ckpt))
 
     if args.fuse:
-        logger.info("\tFusing model...")
         model = fuse_model(model)
 
-    if args.trt:
-        assert not args.fuse, "TensorRT model is not support model fusing!"
-        trt_file = os.path.join(file_name, "model_trt.pth")
-        assert os.path.exists(
-            trt_file
-        ), "TensorRT model is not found!\n Run python3 tools/trt.py first!"
-        model.head.decode_in_inference = False
-        decoder = model.head.decode_outputs
-        logger.info("Using TensorRT to inference")
-    else:
-        trt_file = None
-        decoder = None
-
     predictor = Predictor(
-        model, exp, COCO_CLASSES, trt_file, decoder,
-        args.device, args.fp16, args.legacy,
+        model,
+        config,
+        cls_names=custom_labels if custom_labels is not None else COCO_CLASSES,
+        device=args.device,
+        fp16=args.fp16,
+        legacy=args.legacy,
     )
-    current_time = time.localtime()
-    if args.demo == "image":
-        image_demo(predictor, vis_folder, args.path, current_time, args.save_result)
-    elif args.demo == "video" or args.demo == "webcam":
-        imageflow_demo(predictor, vis_folder, current_time, args)
 
+    if args.type == "image":
+        if os.path.isdir(args.path):
+            files = get_image_list(args.path)
+        else:
+            files = [args.path]
+        files.sort()
+        for image_name in files:
+            outputs, img_info = predictor.inference(image_name)
+            result_image = predictor.visual(outputs[0], img_info, predictor.confthre)
+            if args.save_result:
+                save_folder = os.path.join(config.output_dir, args.config)
+                os.makedirs(save_folder, exist_ok=True)
+                save_file_name = os.path.join(save_folder, os.path.basename(image_name))
+                logger.info("Saving detection result in {}", save_file_name)
+                cv2.imwrite(save_file_name, result_image)
+            else:
+                cv2.imshow(os.path.basename(image_name), result_image)
+                ch = cv2.waitKey(0)
+                if ch == 27 or ch == ord("q") or ch == ord("Q"):
+                    break
+    elif args.type in ["video", "webcam"]:
+        imageflow_demo(predictor, os.path.join(config.output_dir, args.config), args)
 
 if __name__ == "__main__":
-    args = make_parser().parse_args()
-    exp = get_exp(args.exp_file, args.name)
-
-    main(exp, args)
+    main(sys.argv[1:])

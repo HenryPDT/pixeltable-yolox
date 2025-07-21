@@ -98,18 +98,21 @@ def main(args):
     onnx_input_im = torch.zeros(args.batch, 3, *img_size).to(device)
     onnx_output_file = f'{os.path.splitext(args.weights)[0]}.onnx'
 
-    # Set dynamic_axes according to the selected flag
+    # Set dynamic_axes according to the selected flags
     dynamic_axes = None
-    if args.dynamic:
+    if args.dynamic or args.dynamic_shape:
         dynamic_axes = {
-            'input': {0: 'batch'},
-            'output': {0: 'batch'}
+            'input': {},
+            'output': {}
         }
-    elif args.dynamic_shape:
-        dynamic_axes = {
-            'input': {2: 'height', 3: 'width'},
-            'output': {0: 'batch'}
-        }
+        
+        if args.dynamic:
+            dynamic_axes['input'][0] = 'batch'
+            dynamic_axes['output'][0] = 'batch'
+            
+        if args.dynamic_shape:
+            dynamic_axes['input'][2] = 'height'
+            dynamic_axes['input'][3] = 'width'
 
     print(f'Exporting the model to ONNX at {onnx_output_file}')
     torch.onnx.export(
@@ -148,8 +151,8 @@ def parse_args():
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, help='Image size (height, width) for ONNX export (default: use config input_size)')
     parser.add_argument('--opset', type=int, default=11, help='ONNX opset version')
     parser.add_argument('--simplify', action='store_true', help='Simplify the ONNX model using onnxslim')
-    parser.add_argument('--dynamic', action='store_true', help='Enable dynamic batch size in the ONNX model')
-    parser.add_argument('--dynamic-shape', action='store_true', help='Enable dynamic input size (height/width) in the ONNX model')
+    parser.add_argument('--dynamic', action='store_true', help='Enable dynamic batch size in the ONNX model (can be combined with --dynamic-shape)')
+    parser.add_argument('--dynamic-shape', action='store_true', help='Enable dynamic input size (height/width) in the ONNX model (can be combined with --dynamic)')
     parser.add_argument('--batch', type=int, default=1, help='Static batch size for the ONNX model')
     
     args = parser.parse_args()
@@ -165,10 +168,7 @@ def parse_args():
         else:
             raise SystemExit('--imgsz must be 1 or 2 integers (height, width)')
     
-    # Ensure only one dynamic flag is set
-    dynamic_flags = [args.dynamic, args.dynamic_shape]
-    if sum(dynamic_flags) > 1:
-        raise SystemExit('Only one of --dynamic or --dynamic-shape can be set at a time.')
+    # Validate dynamic batch size compatibility
     if args.dynamic and args.batch > 1:
         raise SystemExit('Cannot set --dynamic with --batch > 1 at the same time.')
     

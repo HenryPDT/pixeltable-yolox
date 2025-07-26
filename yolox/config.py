@@ -276,13 +276,35 @@ class YoloxConfig:
         tensor = torch.LongTensor(2).cuda()
 
         if rank == 0:
-            size_factor = self.input_size[1] * 1.0 / self.input_size[0]
+            base_h, base_w = self.input_size
+
             if self.random_size is None:
-                min_size = int(self.input_size[0] / 32) - self.multiscale_range
-                max_size = int(self.input_size[0] / 32) + self.multiscale_range
-                self.random_size = (min_size, max_size)
-            size = random.randint(*self.random_size)
-            size = (int(32 * size), 32 * int(size * size_factor))
+                min_size_factor = int(self.input_size[0] / 32) - self.multiscale_range
+                max_size_factor = int(self.input_size[0] / 32) + self.multiscale_range
+                target_size_range = (min_size_factor * 32, max_size_factor * 32)
+            else:
+                target_size_range = (self.random_size[0] * 32, self.random_size[1] * 32)
+
+            target_longest_side = random.randint(
+                target_size_range[0] // 32, target_size_range[1] // 32
+            ) * 32
+
+            if base_h > base_w:
+                scale = target_longest_side / base_h
+                new_h = target_longest_side
+                new_w = int(base_w * scale)
+            else:
+                scale = target_longest_side / base_w
+                new_w = target_longest_side
+                new_h = int(base_h * scale)
+
+            new_h = int(round(new_h / 32.0)) * 32
+            new_w = int(round(new_w / 32.0)) * 32
+
+            new_h = max(32, new_h)
+            new_w = max(32, new_w)
+
+            size = (new_h, new_w)
             tensor[0] = size[0]
             tensor[1] = size[1]
 

@@ -290,7 +290,7 @@ class Trainer:
                     loss_str,
                     self.meter["lr"].latest,
                 )
-                + (", size: {:d}, {}".format(self.input_size[0], eta_str))
+                + (", size: {}x{}, {}".format(self.input_size[0], self.input_size[1], eta_str))
             )
 
             if self.rank == 0:

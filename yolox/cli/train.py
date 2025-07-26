@@ -152,7 +152,7 @@ Examples:
     # Add --imgsz argument
     data_group.add_argument(
         "--imgsz", type=int, nargs='+', default=None,
-        help="Input image size. Provide one value for square (e.g., 640) or two for (height width), e.g., 96 256. Overrides --input-size if set."
+        help="Image size for both training and testing. Provide one value for square (e.g., 640) or two for (height width), e.g., 96 256. Sets both input_size and test_size."
     )
     data_group.add_argument(
         "--input-size", type=str, default=None,
@@ -173,6 +173,14 @@ Examples:
     data_group.add_argument(
         "--flip-prob", type=float, default=None,
         help="Probability of applying flip augmentation (default: 0.5)"
+    )
+    data_group.add_argument(
+        '--random-size', type=int, nargs=2, default=None,
+        help="Multi-scale range as 'min max' factors (e.g., 10 20). Overrides multiscale-range."
+    )
+    data_group.add_argument(
+        '--multiscale-range', type=int, default=None,
+        help="Simple multi-scale range factor (e.g., 5). Used if random-size is not set."
     )
 
     # Model parameters
@@ -253,7 +261,10 @@ def convert_args_to_config_opts(args):
             h, w = map(int, args.imgsz)
         else:
             raise ValueError(f"--imgsz expects 1 or 2 values, got {args.imgsz}")
+        
+        # Set both input_size and test_size to the same value for consistency
         config_opts['input_size'] = f'({h}, {w})'
+        config_opts['test_size'] = f'({h}, {w})'
     elif args.input_size is not None:
         # Parse input size from 'height,width' format
         try:
@@ -269,6 +280,12 @@ def convert_args_to_config_opts(args):
         config_opts['hsv_prob'] = str(args.hsv_prob)
     if args.flip_prob is not None:
         config_opts['flip_prob'] = str(args.flip_prob)
+    
+    # Handle multi-scale training arguments, with random_size taking precedence
+    if args.random_size is not None:
+        config_opts['random_size'] = f'({args.random_size[0]}, {args.random_size[1]})'
+    elif args.multiscale_range is not None:
+        config_opts['multiscale_range'] = str(args.multiscale_range)
     
     # Model parameters
     if args.depth is not None:

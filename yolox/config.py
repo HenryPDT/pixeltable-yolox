@@ -135,15 +135,19 @@ class YoloxConfig:
 
                 # pre-process input if source type is list or tuple
                 if isinstance(src_value, (list, tuple)):
-                    v = v.strip("[]()")
-                    v = [t.strip() for t in v.split(",")]
+                    # Special handling for random_size to support 'None' string
+                    if k == 'random_size' and v == 'None':
+                        v = None
+                    else:
+                        v = v.strip("[]()")
+                        v = [t.strip() for t in v.split(",")]
 
-                    # find type of tuple
-                    if len(src_value) > 0:
-                        src_item_type = type(src_value[0])
-                        v = [src_item_type(t) for t in v]
+                        # find type of tuple
+                        if len(src_value) > 0:
+                            src_item_type = type(src_value[0])
+                            v = [src_item_type(t) for t in v]
 
-                if src_value is not None and src_type != type(v):
+                if src_value is not None and src_type != type(v) and v is not None:
                     try:
                         v = src_type(v)
                     except Exception:

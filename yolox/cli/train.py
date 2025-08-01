@@ -32,6 +32,9 @@ Examples:
   # Training with augmentation settings (saves to out/augmented_exp)
   yolox train -c yolox_l --mosaic-prob 0.8 --mixup-prob 0.5 --flip-prob 0.5 --output-dir augmented_exp
 
+  # Disable multiscale training completely (saves to out/single_scale)
+  yolox train -c yolox_s --multiscale-range 0 --random-size none --output-dir single_scale
+
   # Advanced configuration override (saves to out/custom_training)
   yolox train -c yolox_s -D scheduler=cosine -D momentum=0.95 --output-dir custom_training
   
@@ -175,8 +178,8 @@ Examples:
         help="Probability of applying flip augmentation (default: 0.5)"
     )
     data_group.add_argument(
-        '--random-size', type=int, nargs=2, default=None,
-        help="Multi-scale range as 'min max' factors (e.g., 10 20). Overrides multiscale-range."
+        '--random-size', type=str, nargs='?', default=None, const='none',
+        help="Multi-scale range as 'min max' factors (e.g., '10 20'). Use 'none' to disable. Overrides multiscale-range."
     )
     data_group.add_argument(
         '--multiscale-range', type=int, default=None,
@@ -281,10 +284,20 @@ def convert_args_to_config_opts(args):
     if args.flip_prob is not None:
         config_opts['flip_prob'] = str(args.flip_prob)
     
-    # Handle multi-scale training arguments, with random_size taking precedence
+    # Handle multi-scale training arguments - process both independently
     if args.random_size is not None:
-        config_opts['random_size'] = f'({args.random_size[0]}, {args.random_size[1]})'
-    elif args.multiscale_range is not None:
+        if args.random_size == 'none':
+            # Explicitly disable random_size by setting it to None
+            config_opts['random_size'] = 'None'
+        else:
+            # Parse as two integers
+            try:
+                min_size, max_size = map(int, args.random_size.split())
+                config_opts['random_size'] = f'({min_size}, {max_size})'
+            except ValueError:
+                raise ValueError(f"Invalid random-size format: {args.random_size}. Use 'min max' (e.g., '10 20') or 'none' to disable.")
+    
+    if args.multiscale_range is not None:
         config_opts['multiscale_range'] = str(args.multiscale_range)
     
     # Model parameters

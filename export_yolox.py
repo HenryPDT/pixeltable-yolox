@@ -102,17 +102,17 @@ def main(args):
     dynamic_axes = None
     if args.dynamic or args.dynamic_shape:
         dynamic_axes = {
-            'input': {},
+            'images': {},
             'output': {}
         }
         
         if args.dynamic:
-            dynamic_axes['input'][0] = 'batch'
+            dynamic_axes['images'][0] = 'batch'
             dynamic_axes['output'][0] = 'batch'
             
         if args.dynamic_shape:
-            dynamic_axes['input'][2] = 'height'
-            dynamic_axes['input'][3] = 'width'
+            dynamic_axes['images'][2] = 'height'
+            dynamic_axes['images'][3] = 'width'
 
     print(f'Exporting the model to ONNX at {onnx_output_file}')
     torch.onnx.export(
@@ -122,7 +122,7 @@ def main(args):
         verbose=False,
         opset_version=args.opset,
         do_constant_folding=True,
-        input_names=['input'],
+        input_names=['images'],
         output_names=['output'],
         dynamic_axes=dynamic_axes
     )

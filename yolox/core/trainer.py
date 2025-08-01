@@ -1,6 +1,5 @@
 # Copyright (c) Megvii, Inc. and its affiliates.
 
-from argparse import Namespace
 import datetime
 import os
 import time
@@ -12,6 +11,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from yolox.config import YoloxConfig
 from yolox.data import DataPrefetcher
+from yolox.data.datasets import ConcatDataset, MixConcatDataset
 from yolox.utils import (
     MeterBuffer,
     MlflowLogger,
@@ -37,7 +37,7 @@ from yolox.utils import (
 
 
 class Trainer:
-    def __init__(self, config: YoloxConfig, args: Namespace):
+    def __init__(self, config: YoloxConfig, args):
         # init function only defines some basic attr, other attrs like model, optimizer are built in
         # before_train methods.
         self.exp = config
@@ -132,6 +132,30 @@ class Trainer:
 
     def before_train(self):
         logger.info("args: {}".format(self.args))
+
+        # Get dataset and num_classes before initializing model
+        if self.exp.dataset is None:
+            self.exp.dataset = self.exp.get_dataset(cache=bool(self.args.cache), cache_type=self.args.cache)
+
+        base_dataset = self.exp.dataset
+        if isinstance(base_dataset, (ConcatDataset, MixConcatDataset)):
+            base_dataset = base_dataset.datasets[0]
+
+        if hasattr(base_dataset, "class_ids"):
+            num_classes = len(base_dataset.class_ids)
+        elif hasattr(base_dataset, "_classes"):
+            num_classes = len(base_dataset._classes)
+        else:
+            raise ValueError("Cannot determine number of classes from dataset.")
+
+        # Always use the number of classes from the dataset
+        if self.exp.num_classes != num_classes:
+            logger.info(f"Setting num_classes to {num_classes} from the dataset (previously {self.exp.num_classes}).")
+            self.exp.num_classes = num_classes
+            # reset model cache in exp if it was created with wrong num_classes
+            if hasattr(self.exp, 'model'):
+                delattr(self.exp, 'model')
+
         logger.info("exp value:\n{}".format(self.exp))
 
         # model related init

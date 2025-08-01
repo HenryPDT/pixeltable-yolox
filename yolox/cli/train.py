@@ -148,10 +148,6 @@ Examples:
         "--data-dir", type=str, default=None,
         help="Path to dataset directory"
     )
-    data_group.add_argument(
-        "--num-classes", type=int, default=None,
-        help="Number of classes (default: 80)"
-    )
     # Add --imgsz argument
     data_group.add_argument(
         "--imgsz", type=int, nargs='+', default=None,
@@ -253,8 +249,6 @@ def convert_args_to_config_opts(args):
     # Data parameters
     if args.data_dir is not None:
         config_opts['data_dir'] = args.data_dir
-    if args.num_classes is not None:
-        config_opts['num_classes'] = str(args.num_classes)
     # Handle imgsz and input_size precedence
     if args.imgsz is not None:
         # Accept one or two ints

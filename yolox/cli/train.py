@@ -3,6 +3,7 @@
 import argparse
 import os
 import random
+import shlex
 import sys
 import warnings
 
@@ -141,6 +142,10 @@ Examples:
         "--output-dir", type=str, default=None,
         help="Experiment name for output directory. Results will be saved to out/{name}. Auto-increments if directory exists (e.g., out/my_exp_2)"
     )
+    training_group.add_argument(
+        "--min-lr-ratio", "--min-lr", type=float, default=None,
+        help="Minimum learning rate ratio. The learning rate will never drop below lr * min_lr_ratio (default: 0.05)"
+    )
 
     # Data parameters
     data_group = parser.add_argument_group('Data Parameters', 'Dataset and augmentation parameters')
@@ -244,6 +249,8 @@ def convert_args_to_config_opts(args):
         config_opts['eval_interval'] = str(args.eval_interval)
     if args.save_history:
         config_opts['save_history_ckpt'] = 'True'
+    if args.min_lr_ratio is not None:
+        config_opts['min_lr_ratio'] = str(args.min_lr_ratio)
     # Note: output_dir is handled separately in main() function
     
     # Data parameters
@@ -342,6 +349,17 @@ def main(argv: list[str]) -> None:
         output_dir, experiment_name = get_unique_output_name(base_output_dir, args.name)
         config.output_dir = output_dir
         args.name = experiment_name
+
+    # Save the exact command used to train for easy reproduction
+    exp_dir = os.path.join(config.output_dir, args.name)
+    os.makedirs(exp_dir, exist_ok=True)
+    try:
+        command_str = shlex.join(["yolox", "train"] + argv)
+        with open(os.path.join(exp_dir, "train_command.txt"), "w") as f:
+            f.write("# Training command used for this experiment:\n")
+            f.write(f"{command_str}\n")
+    except Exception as e:
+        logger.warning(f"Failed to save training command: {e}")
 
     num_gpu = get_num_devices() if args.devices is None else args.devices
     assert num_gpu <= get_num_devices()

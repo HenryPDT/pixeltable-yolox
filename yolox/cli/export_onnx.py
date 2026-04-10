@@ -124,7 +124,8 @@ def main_export(args):
         do_constant_folding=True,
         input_names=['images'],
         output_names=['output'],
-        dynamic_axes=dynamic_axes
+        dynamic_axes=dynamic_axes,
+        dynamo=False
     )
 
     if args.simplify:

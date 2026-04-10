@@ -11,6 +11,8 @@ modernized for recent versions of Python and refactored to be more easily usable
 ## Table of Contents
 - [About this Fork](#about-this-fork)
 - [Installation](#installation)
+  - [Option A: Using `uv` (recommended)](#option-a-using-uv-recommended)
+  - [Option B: Using `conda`](#option-b-using-conda)
 - [Getting Started](#getting-started)
   - [Inference with Python](#inference-with-python)
   - [Pretrained Models](#pretrained-models)
@@ -55,6 +57,29 @@ First, clone the repository to your local machine:
 git clone https://github.com/HenryPDT/pixeltable-yolox.git
 cd pixeltable-yolox
 ```
+
+### Option A: Using `uv` (recommended)
+
+[`uv`](https://github.com/astral-sh/uv) is a fast Python package manager. If you don't have it installed:
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Create a virtual environment, activate it, and install the package:
+```bash
+uv venv --python 3.10
+source .venv/bin/activate
+uv pip install -e .
+```
+
+Once activated, you can use `yolox` and `python` normally without any prefix:
+```bash
+yolox detect --config yolox-s --path assets/dog.jpg
+```
+
+> **Tip:** If you prefer not to activate the environment, you can prefix any command with `uv run` instead (e.g. `uv run yolox detect ...`).
+
+### Option B: Using `conda`
 
 Create a new conda environment with Python 3.10:
 ```bash

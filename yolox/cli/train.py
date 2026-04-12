@@ -146,6 +146,22 @@ Examples:
         "--min-lr-ratio", "--min-lr", type=float, default=None,
         help="Minimum learning rate ratio. The learning rate will never drop below lr * min_lr_ratio (default: 0.05)"
     )
+    training_group.add_argument(
+        "--grad-accum", type=int, default=None,
+        help="Gradient accumulation steps (default: 1)"
+    )
+    training_group.add_argument(
+        "--clip-grad", type=float, default=None,
+        help="Gradient clipping max norm (default: 0.1)"
+    )
+    training_group.add_argument(
+        "--patience", type=int, default=None,
+        help="Early stopping patience in epochs (default: 0)"
+    )
+    training_group.add_argument(
+        "--seed", type=int, default=None,
+        help="Deterministic training seed (default: None)"
+    )
 
     # Data parameters
     data_group = parser.add_argument_group('Data Parameters', 'Dataset and augmentation parameters')
@@ -176,7 +192,47 @@ Examples:
     )
     data_group.add_argument(
         "--flip-prob", type=float, default=None,
-        help="Probability of applying flip augmentation (default: 0.5)"
+        help="Probability of applying horizontal flip augmentation (default: 0.5)"
+    )
+    data_group.add_argument(
+        "--vflip-prob", type=float, default=None,
+        help="Probability of applying vertical flip augmentation (default: 0.0)"
+    )
+    data_group.add_argument(
+        "--blur-prob", type=float, default=None,
+        help="Probability of applying blur augmentation (default: 0.01)"
+    )
+    data_group.add_argument(
+        "--noise-prob", type=float, default=None,
+        help="Probability of applying noise augmentation (default: 0.01)"
+    )
+    data_group.add_argument(
+        "--gamma-prob", type=float, default=None,
+        help="Probability of applying gamma augmentation (default: 0.02)"
+    )
+    data_group.add_argument(
+        "--brightness-prob", type=float, default=None,
+        help="Probability of applying brightness augmentation (default: 0.02)"
+    )
+    data_group.add_argument(
+        "--to-gray-prob", type=float, default=None,
+        help="Probability of applying grayscale augmentation (default: 0.01)"
+    )
+    data_group.add_argument(
+        "--dropout-prob", type=float, default=None,
+        help="Probability of applying coarse dropout augmentation (default: 0.0)"
+    )
+    data_group.add_argument(
+        "--rotate90-prob", type=float, default=None,
+        help="Probability of applying 90-degree rotation augmentation (default: 0.0)"
+    )
+    data_group.add_argument(
+        "--rotation-prob", type=float, default=None,
+        help="Probability of applying random rotation augmentation (default: 0.0)"
+    )
+    data_group.add_argument(
+        "--rotation-degree", type=float, default=None,
+        help="Max rotation degree for random rotation (default: 0.0)"
     )
     data_group.add_argument(
         '--random-size', type=str, nargs='?', default=None, const='none',
@@ -281,9 +337,38 @@ def convert_args_to_config_opts(args):
     if args.mixup_prob is not None:
         config_opts['mixup_prob'] = str(args.mixup_prob)
     if args.hsv_prob is not None:
-        config_opts['hsv_prob'] = str(args.hsv_prob)
+        config_opts['aug_hsv_prob'] = str(args.hsv_prob)
     if args.flip_prob is not None:
-        config_opts['flip_prob'] = str(args.flip_prob)
+        config_opts['aug_hflip_prob'] = str(args.flip_prob)
+    if args.vflip_prob is not None:
+        config_opts['aug_vflip_prob'] = str(args.vflip_prob)
+    if args.blur_prob is not None:
+        config_opts['aug_blur_prob'] = str(args.blur_prob)
+    if args.noise_prob is not None:
+        config_opts['aug_noise_prob'] = str(args.noise_prob)
+    if args.gamma_prob is not None:
+        config_opts['aug_gamma_prob'] = str(args.gamma_prob)
+    if args.brightness_prob is not None:
+        config_opts['aug_brightness_prob'] = str(args.brightness_prob)
+    if args.to_gray_prob is not None:
+        config_opts['aug_to_gray_prob'] = str(args.to_gray_prob)
+    if args.dropout_prob is not None:
+        config_opts['aug_coarse_dropout_prob'] = str(args.dropout_prob)
+    if args.rotate90_prob is not None:
+        config_opts['aug_rotate90_prob'] = str(args.rotate90_prob)
+    if args.rotation_prob is not None:
+        config_opts['aug_rotation_prob'] = str(args.rotation_prob)
+    if args.rotation_degree is not None:
+        config_opts['aug_rotation_degree'] = str(args.rotation_degree)
+    
+    if args.grad_accum is not None:
+        config_opts['grad_accum_steps'] = str(args.grad_accum)
+    if args.clip_grad is not None:
+        config_opts['clip_max_norm'] = str(args.clip_grad)
+    if args.patience is not None:
+        config_opts['early_stopping_patience'] = str(args.patience)
+    if args.seed is not None:
+        config_opts['seed'] = str(args.seed)
     
     # Handle multi-scale training arguments - process both independently
     if args.random_size is not None:

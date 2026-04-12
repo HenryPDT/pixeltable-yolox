@@ -74,6 +74,33 @@ def per_class_AP_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "A
     return table
 
 
+def per_class_AP50_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "AP50"], colums=6):
+    """Per-class AP at IoU=0.50 specifically (index 0 in the IoU dimension)."""
+    per_class_AP50 = {}
+    precisions = coco_eval.eval["precision"]
+    # dimension of precisions: [TxRxKxAxM]
+    # precision has dims (iou, recall, cls, area range, max dets)
+    assert len(class_names) == precisions.shape[2]
+
+    for idx, name in enumerate(class_names):
+        # iou index 0 = IoU threshold 0.50
+        # area range index 0: all area ranges
+        # max dets index -1: typically 100 per image
+        precision = precisions[0, :, idx, 0, -1]
+        precision = precision[precision > -1]
+        ap50 = np.mean(precision) if precision.size else float("nan")
+        per_class_AP50[name] = float(ap50 * 100)
+
+    num_cols = min(colums, len(per_class_AP50) * len(headers))
+    result_pair = [x for pair in per_class_AP50.items() for x in pair]
+    row_pair = itertools.zip_longest(*[result_pair[i::num_cols] for i in range(num_cols)])
+    table_headers = headers * (num_cols // len(headers))
+    table = tabulate(
+        row_pair, tablefmt="pipe", floatfmt=".3f", headers=table_headers, numalign="left",
+    )
+    return table
+
+
 class CocoEvaluator:
     """
     COCO AP Evaluation class.  All the data in the val2017 dataset are processed
@@ -90,6 +117,7 @@ class CocoEvaluator:
         testdev: bool = False,
         per_class_AP: bool = True,
         per_class_AR: bool = True,
+        save_dir: str = None,
     ):
         """
         Args:
@@ -101,6 +129,7 @@ class CocoEvaluator:
             nmsthre: IoU threshold of non-max supression ranging from 0 to 1.
             per_class_AP: Show per class AP during evalution or not. Default to True.
             per_class_AR: Show per class AR during evalution or not. Default to True.
+            save_dir: directory to save evaluation artifacts (plots, etc).
         """
         self.dataloader = dataloader
         self.img_size = img_size
@@ -110,6 +139,7 @@ class CocoEvaluator:
         self.testdev = testdev
         self.per_class_AP = per_class_AP
         self.per_class_AR = per_class_AR
+        self.save_dir = save_dir
 
     def evaluate(
         self, model, distributed=False, half=False, trt_file=None,
@@ -306,10 +336,29 @@ class CocoEvaluator:
             cat_names = [cocoGt.cats[catId]['name'] for catId in sorted(cat_ids)]
             if self.per_class_AP:
                 AP_table = per_class_AP_table(cocoEval, class_names=cat_names)
-                info += "per class AP:\n" + AP_table + "\n"
+                info += "per class AP (50:95):\n" + AP_table + "\n"
+                AP50_table = per_class_AP50_table(cocoEval, class_names=cat_names)
+                info += "per class AP50:\n" + AP50_table + "\n"
             if self.per_class_AR:
                 AR_table = per_class_AR_table(cocoEval, class_names=cat_names)
                 info += "per class AR:\n" + AR_table + "\n"
+
+            # Confidence threshold analysis
+            from yolox.utils.confidence_analysis import find_best_confidence_threshold
+            try:
+                threshold_result = find_best_confidence_threshold(
+                    cocoEval,
+                    class_names=cat_names,
+                    save_dir=self.save_dir,
+                )
+                if threshold_result is not None:
+                    info += (
+                        f"\nBest confidence threshold: {threshold_result['best_threshold']:.2f} "
+                        f"(F1={threshold_result['best_f1']:.4f})\n"
+                    )
+            except Exception as e:
+                logger.warning(f"Confidence threshold analysis failed: {e}")
+
             return cocoEval.stats[0], cocoEval.stats[1], info
         else:
             return 0, 0, info

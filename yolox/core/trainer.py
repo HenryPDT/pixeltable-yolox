@@ -1,9 +1,10 @@
-# Copyright (c) Megvii, Inc. and its affiliates.
-
 import datetime
 import os
+import random
 import time
 from loguru import logger
+
+import numpy as np
 
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -53,6 +54,11 @@ class Trainer:
         self.device = "cuda:{}".format(self.local_rank)
         self.use_model_ema = config.ema
         self.save_history_ckpt = config.save_history_ckpt
+        self.grad_accum_steps = max(config.grad_accum_steps, 1)
+        self.clip_max_norm = config.clip_max_norm
+        self.early_stopping_patience = config.early_stopping_patience
+        self._early_stopping_counter = 0
+        self._stop_training = False
 
         # data/dataloader related attr
         self.data_type = torch.float16 if args.fp16 else torch.float32
@@ -85,6 +91,8 @@ class Trainer:
 
     def train_in_epoch(self):
         for self.epoch in range(self.start_epoch, self.max_epoch):
+            if self._stop_training:
+                break
             self.before_epoch()
             self.train_in_iter()
             self.after_epoch()
@@ -110,10 +118,22 @@ class Trainer:
 
         loss = outputs["total_loss"]
 
-        self.optimizer.zero_grad()
+        # Scale loss by accumulation steps for correct gradient magnitude
+        if self.grad_accum_steps > 1:
+            loss = loss / self.grad_accum_steps
+
         self.scaler.scale(loss).backward()
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
+
+        # Only step the optimizer every grad_accum_steps iterations
+        if (self.iter + 1) % self.grad_accum_steps == 0:
+            # Gradient clipping
+            if self.clip_max_norm > 0:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_max_norm)
+
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.optimizer.zero_grad()
 
         if self.use_model_ema:
             self.ema_model.update(self.model)
@@ -168,6 +188,7 @@ class Trainer:
 
         # solver related init
         self.optimizer = self.exp.get_optimizer(self.args.batch_size)
+        self.optimizer.zero_grad()  # Initialize gradients to zero for accumulation
 
         # value of epoch will be set in `resume_train`
         model = self.resume_train(model)
@@ -235,6 +256,28 @@ class Trainer:
         logger.info("Training start...")
         # logger.info("\n{}".format(model))
 
+        # Deterministic seeding
+        if self.exp.seed is not None:
+            seed = self.exp.seed + self.rank if self.is_distributed else self.exp.seed
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            random.seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            if self.exp.deterministic:
+                torch.backends.cudnn.deterministic = True
+                torch.backends.cudnn.benchmark = False
+            logger.info(f"Set random seed to {seed} (deterministic={self.exp.deterministic})")
+
+        if self.grad_accum_steps > 1:
+            logger.info(
+                f"Using gradient accumulation: {self.grad_accum_steps} steps "
+                f"(effective batch size = batch_size * {self.grad_accum_steps})"
+            )
+        if self.clip_max_norm > 0:
+            logger.info(f"Using gradient clipping with max_norm={self.clip_max_norm}")
+        if self.early_stopping_patience > 0:
+            logger.info(f"Early stopping enabled with patience={self.early_stopping_patience} epochs")
+
     def after_train(self):
         logger.info(
             "Training of experiment is done and the best AP is {:.2f}".format(self.best_ap * 100)
@@ -269,6 +312,15 @@ class Trainer:
                 self.save_ckpt(ckpt_name="last_mosaic_epoch")
 
     def after_epoch(self):
+        # Flush leftover accumulated gradients at the end of the epoch
+        if self.grad_accum_steps > 1 and (self.max_iter % self.grad_accum_steps != 0):
+            if self.clip_max_norm > 0:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_max_norm)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.optimizer.zero_grad()
+
         self.save_ckpt(ckpt_name="latest")
 
         if (self.epoch + 1) % self.exp.eval_interval == 0:
@@ -398,6 +450,25 @@ class Trainer:
 
         update_best_ckpt = ap50_95 > self.best_ap
         self.best_ap = max(self.best_ap, ap50_95)
+
+        # Early stopping logic
+        if self.early_stopping_patience > 0:
+            if update_best_ckpt:
+                self._early_stopping_counter = 0
+            else:
+                self._early_stopping_counter += 1
+                if self.rank == 0:
+                    logger.info(
+                        f"Early stopping counter: {self._early_stopping_counter}"
+                        f"/{self.early_stopping_patience}"
+                    )
+                if self._early_stopping_counter >= self.early_stopping_patience:
+                    if self.rank == 0:
+                        logger.info(
+                            f"Early stopping triggered after {self._early_stopping_counter} "
+                            f"epochs without improvement. Best AP: {self.best_ap:.4f}"
+                        )
+                    self._stop_training = True
 
         if self.rank == 0:
             if self.args.logger == "tensorboard":

@@ -61,10 +61,6 @@ class YoloxConfig:
     mosaic_prob: float = 1.0
     # prob of applying mixup aug
     mixup_prob: float = 1.0
-    # prob of applying hsv aug
-    hsv_prob: float = 1.0
-    # prob of applying flip aug
-    flip_prob: float = 0.5
     # rotation angle range, for example, if set to 2, the true range is (-2, 2)
     degrees: float = 10.0
     # translate range, for example, if set to 0.1, the true range is (-0.1, 0.1)
@@ -75,6 +71,26 @@ class YoloxConfig:
     mixup_scale: tuple[float, float] = (0.5, 1.5)
     # shear angle range, for example, if set to 2, the true range is (-2, 2)
     shear: float = 2.0
+
+    # --------------- augmentation config (albumentations) ------------- #
+    # All per-image augmentations are handled by albumentations.
+    # These are applied after mosaic/mixup, before final preprocessing.
+    # Set probability to 0.0 to disable any specific augmentation.
+    # -- Core augmentations (replaces legacy augment_hsv + _mirror) --
+    aug_hsv_prob: float = 1.0       # HSV color augmentation probability
+    aug_hflip_prob: float = 0.5     # horizontal flip probability
+    # -- Additional pixel-level augmentations --
+    aug_blur_prob: float = 0.01
+    aug_noise_prob: float = 0.01
+    aug_gamma_prob: float = 0.02
+    aug_brightness_prob: float = 0.02
+    aug_to_gray_prob: float = 0.01
+    aug_coarse_dropout_prob: float = 0.0
+    # -- Additional spatial augmentations --
+    aug_vflip_prob: float = 0.0
+    aug_rotate90_prob: float = 0.0
+    aug_rotation_degree: float = 0.0
+    aug_rotation_prob: float = 0.0
 
     # --------------  training config --------------------- #
     # epoch number used for warmup
@@ -92,6 +108,14 @@ class YoloxConfig:
     no_aug_epochs: int = 15
     # apply EMA during training
     ema: bool = True
+    # gradient accumulation steps. Effective batch = batch_size * grad_accum_steps.
+    # Set to 1 to disable (default behavior).
+    grad_accum_steps: int = 1
+    # gradient clipping max norm. Set to 0.0 to disable.
+    clip_max_norm: float = 0.1
+    # early stopping patience in epochs. 0 = disabled.
+    # Training stops if mAP doesn't improve for this many consecutive eval rounds.
+    early_stopping_patience: int = 0
 
     # weight decay of optimizer
     weight_decay: float = 5e-4
@@ -180,6 +204,24 @@ class YoloxConfig:
         self.model.train()
         return self.model
 
+    def _build_albu_transform(self):
+        """Build an AlbumentationsTransform from config fields."""
+        from yolox.data import AlbumentationsTransform
+        return AlbumentationsTransform(
+            hsv_prob=self.aug_hsv_prob,
+            hflip_prob=self.aug_hflip_prob,
+            blur_prob=self.aug_blur_prob,
+            noise_prob=self.aug_noise_prob,
+            gamma_prob=self.aug_gamma_prob,
+            brightness_prob=self.aug_brightness_prob,
+            to_gray_prob=self.aug_to_gray_prob,
+            coarse_dropout_prob=self.aug_coarse_dropout_prob,
+            vflip_prob=self.aug_vflip_prob,
+            rotate90_prob=self.aug_rotate90_prob,
+            rotation_degree=self.aug_rotation_degree,
+            rotation_prob=self.aug_rotation_prob,
+        )
+
     def get_dataset(self, cache: bool = False, cache_type: str = "ram"):
         """
         Get dataset according to cache and cache_type parameters.
@@ -197,8 +239,7 @@ class YoloxConfig:
             img_size=self.input_size,
             preproc=TrainTransform(
                 max_labels=50,
-                flip_prob=self.flip_prob,
-                hsv_prob=self.hsv_prob
+                albu_transform=self._build_albu_transform(),
             ),
             cache=cache,
             cache_type=cache_type,
@@ -238,8 +279,7 @@ class YoloxConfig:
             img_size=self.input_size,
             preproc=TrainTransform(
                 max_labels=120,
-                flip_prob=self.flip_prob,
-                hsv_prob=self.hsv_prob),
+                albu_transform=self._build_albu_transform()),
             degrees=self.degrees,
             translate=self.translate,
             mosaic_scale=self.mosaic_scale,
@@ -418,6 +458,7 @@ class YoloxConfig:
             nmsthre=self.nmsthre,
             num_classes=self.num_classes,
             testdev=testdev,
+            save_dir=self.output_dir,
         )
 
     def get_trainer(self, args):

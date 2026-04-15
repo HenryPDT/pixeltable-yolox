@@ -261,7 +261,8 @@ class YoloxConfig:
             MosaicDetection,
             TrainTransform,
             YoloBatchSampler,
-            worker_init_reset_seed
+            worker_init_opencv_only,
+            worker_init_reset_seed,
         )
         from yolox.utils import wait_for_the_master
 
@@ -304,7 +305,11 @@ class YoloxConfig:
 
         # Make sure each process has different random seed, especially for 'fork' method.
         # Check https://github.com/pytorch/pytorch/issues/63311 for more details.
-        worker_init_fn = None if self.deterministic else worker_init_reset_seed
+        # Always set a worker_init_fn so OpenCV thread count is 0 in workers; fork + cv2
+        # + albumentations otherwise deadlocks or stalls the first batch indefinitely.
+        worker_init_fn = (
+            worker_init_opencv_only if self.deterministic else worker_init_reset_seed
+        )
 
         train_loader = DataLoader(
             self.dataset,

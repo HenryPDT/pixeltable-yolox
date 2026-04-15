@@ -203,12 +203,17 @@ class Trainer:
         )
         logger.info("init prefetcher, this might take one minute or less...")
         self.prefetcher = DataPrefetcher(self.train_loader)
+        logger.info(
+            f"Train dataloader ready: max_iter={len(self.train_loader)} "
+            f"(num_workers={self.exp.data_num_workers})."
+        )
         # max_iter means iters per epoch
         self.max_iter = len(self.train_loader)
 
         self.lr_scheduler = self.exp.get_lr_scheduler(
             self.exp.basic_lr_per_img * self.args.batch_size, self.max_iter
         )
+        logger.info("LR scheduler initialized.")
         if self.args.occupy:
             occupy_mem(self.local_rank)
 
@@ -221,19 +226,23 @@ class Trainer:
 
         self.model = model
 
+        logger.info("Building validation evaluator / dataloader...")
         self.evaluator = self.exp.get_evaluator(
             batch_size=self.args.batch_size, is_distributed=self.is_distributed
         )
-        
+        logger.info("Evaluator ready.")
+
         # Log dataset statistics only on main process
         if self.rank == 0:
             # Analyze and log training dataset statistics
             train_dataset = self.train_loader.dataset
+            logger.info("Computing training dataset statistics (sampled)...")
             train_stats = analyze_dataset_stats(train_dataset, "Training Dataset")
             log_dataset_stats(train_stats, "Training Dataset")
-            
+
             # Analyze and log validation dataset statistics
             val_dataset = self.evaluator.dataloader.dataset
+            logger.info("Computing validation dataset statistics (sampled)...")
             val_stats = analyze_dataset_stats(val_dataset, "Validation Dataset")
             log_dataset_stats(val_stats, "Validation Dataset")
         

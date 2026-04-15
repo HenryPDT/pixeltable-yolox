@@ -265,6 +265,45 @@ class AlbumentationsTransform:
         if len(boxes_xyxy) == 0:
             return image, boxes_xyxy, labels
 
+        boxes_xyxy = np.asarray(boxes_xyxy, dtype=np.float32)
+        labels = np.asarray(labels)
+        x1, y1, x2, y2 = (
+            boxes_xyxy[:, 0],
+            boxes_xyxy[:, 1],
+            boxes_xyxy[:, 2],
+            boxes_xyxy[:, 3],
+        )
+        # Mosaic / clip can leave zero-area edge boxes; Albumentations raises ValueError
+        # on x_max <= x_min (strict check in check_bboxes).
+        valid = (x2 > x1 + 1e-4) & (y2 > y1 + 1e-4)
+        if not np.any(valid):
+            transformed = self.transform(image=image, bboxes=[], class_labels=[])
+            return transformed["image"], np.zeros((0, 4), dtype=np.float32), np.zeros(
+                (0,), dtype=np.float32
+            )
+        boxes_xyxy = boxes_xyxy[valid]
+        labels = labels[valid]
+
+        # Albumentations validates normalized coords in [0, 1]; float / aug drift can
+        # leave x_max slightly past the image edge (e.g. 1.0015), which raises ValueError.
+        h, w = image.shape[0], image.shape[1]
+        boxes_xyxy[:, [0, 2]] = np.clip(boxes_xyxy[:, [0, 2]], 0.0, float(w))
+        boxes_xyxy[:, [1, 3]] = np.clip(boxes_xyxy[:, [1, 3]], 0.0, float(h))
+        x1, y1, x2, y2 = (
+            boxes_xyxy[:, 0],
+            boxes_xyxy[:, 1],
+            boxes_xyxy[:, 2],
+            boxes_xyxy[:, 3],
+        )
+        valid = (x2 > x1 + 1e-4) & (y2 > y1 + 1e-4)
+        if not np.any(valid):
+            transformed = self.transform(image=image, bboxes=[], class_labels=[])
+            return transformed["image"], np.zeros((0, 4), dtype=np.float32), np.zeros(
+                (0,), dtype=np.float32
+            )
+        boxes_xyxy = boxes_xyxy[valid]
+        labels = labels[valid]
+
         transformed = self.transform(
             image=image,
             bboxes=boxes_xyxy,

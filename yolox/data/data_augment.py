@@ -341,8 +341,11 @@ class TrainTransform:
         boxes_o = xyxy2cxcywh(boxes_o)
 
         # Apply all augmentations via albumentations (HSV, flip, blur, noise, etc.)
+        # Albumentations expects RGB but YOLOX provides BGR from cv2
         if self.albu_transform is not None:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             image, boxes, labels = self.albu_transform(image, boxes, labels)
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
         image_t, r_ = preproc(image, input_dim)
         # boxes [xyxy] 2 [cx,cy,w,h]

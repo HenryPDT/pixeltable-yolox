@@ -112,7 +112,7 @@ class YoloxConfig:
     # Set to 1 to disable (default behavior).
     grad_accum_steps: int = 1
     # gradient clipping max norm. Set to 0.0 to disable.
-    clip_max_norm: float = 0.1
+    clip_max_norm: float = 0.0
     # early stopping patience in epochs. 0 = disabled.
     # Training stops if mAP doesn't improve for this many consecutive eval rounds.
     early_stopping_patience: int = 0

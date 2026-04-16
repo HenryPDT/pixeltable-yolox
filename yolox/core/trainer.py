@@ -135,8 +135,8 @@ class Trainer:
             self.scaler.update()
             self.optimizer.zero_grad()
 
-        if self.use_model_ema:
-            self.ema_model.update(self.model)
+            if self.use_model_ema:
+                self.ema_model.update(self.model)
 
         lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
         for param_group in self.optimizer.param_groups:

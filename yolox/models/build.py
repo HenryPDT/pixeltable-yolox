@@ -67,7 +67,7 @@ def create_yolox_model(name: str, pretrained: bool = True, num_classes: int = 80
         exp: Exp = get_exp(exp_file=exp_path)
         yolox_model = exp.get_model()
         if ckpt_path:
-            ckpt = torch.load(ckpt_path, map_location="cpu")
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             if "model" in ckpt:
                 ckpt = ckpt["model"]
             yolox_model.load_state_dict(ckpt)

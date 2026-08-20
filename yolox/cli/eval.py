@@ -153,7 +153,7 @@ def eval(config: YoloxConfig, args, num_gpu):
             ckpt_file = args.ckpt
         logger.info("loading checkpoint from {}".format(ckpt_file))
         loc = "cuda:{}".format(rank)
-        ckpt = torch.load(ckpt_file, map_location=loc)
+        ckpt = torch.load(ckpt_file, map_location=loc, weights_only=False)
         model.load_state_dict(ckpt["model"])
         logger.info("loaded checkpoint done.")
 

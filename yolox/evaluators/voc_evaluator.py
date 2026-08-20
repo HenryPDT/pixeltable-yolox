@@ -71,7 +71,7 @@ class VocEvaluator:
             from torch2trt import TRTModule
 
             model_trt = TRTModule()
-            model_trt.load_state_dict(torch.load(trt_file))
+            model_trt.load_state_dict(torch.load(trt_file, weights_only=False))
 
             x = torch.ones(1, 3, test_size[0], test_size[1]).cuda()
             model(x)

@@ -50,7 +50,7 @@ class YoloFpn(nn.Module):
 
     def load_pretrained_model(self, filename="./weights/darknet53.mix.pth"):
         with open(filename, "rb") as f:
-            state_dict = torch.load(f, map_location="cpu")
+            state_dict = torch.load(f, map_location="cpu", weights_only=False)
         print("loading pretrained weights...")
         self.backbone.load_state_dict(state_dict)
 

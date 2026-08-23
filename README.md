@@ -33,12 +33,19 @@ compatibility issues with current Python environments, dependencies, and platfor
 to provide a reliable, up-to-date, and easy-to-use version of YOLOX that maintains its Apache license, ensuring it
 remains accessible for academic and commercial use.
 
-This fork is a work in progress. So far, it contains the following changes to the base YOLOX repo:
+This fork contains the following changes and modernizations:
 
-- `pip install`able with all versions of Python (3.9+)
-- New `YoloxProcessor` class to simplify inference
-- Refactored CLI for training and evaluation
-- Improved test coverage
+- `pip install`able with all modern versions of Python (3.9+) via `uv` or `pip`
+- **Auto Batch Size Discovery (`-b -1`)**: Automatically probes GPU VRAM using real forward/backward passes at maximum multi-scale headroom
+- **Decoupled Backbone Learning Rate (`--backbone-lr-ratio`)**: Scales backbone LR (e.g. 0.2x) to preserve generic pretrained features during transfer learning
+- **Modern Optimizer Suite (`--optimizer`)**: Added `AdamW` and `Adan` (Adaptive Nesterov Momentum) for rapid convergence in 30–50 epochs alongside standard `SGD`
+- **Mixed Precision (`--amp-dtype`)**: Native `bfloat16` and `float16` support with automatic hardware detection and zero loss-scaler overhead on Ampere/Ada/Hopper
+- **Confidence Threshold Analysis**: Evaluates optimal F1 confidence thresholds and automatically generates `f1_vs_threshold.png` and `pr_vs_threshold.png`
+- **Self-Describing Checkpoints (`meta`)**: Checkpoints carry class names, counts, and model metadata for zero-config ONNX exports and inference
+- **Early Stopping (`--patience`)**: Automatically halts training and preserves best weights when validation mAP stops improving
+- New `YoloxProcessor` class to simplify Python inference and post-processing
+- Refactored CLI for training, evaluation, and ONNX export
+- Improved test coverage with full regression safeguards
 
 ### Who are we?
 Pixeltable, Inc. is a venture-backed AI infrastructure startup. Our core product is
@@ -199,17 +206,74 @@ For instructions on training with a custom dataset format, see [Train on Custom 
 
 **2. Start Training**
 
-To start training, run the `yolox train` command. For example, to train `yolox-s`:
+#### Fast Fine-Tuning with Modern Features (Recommended)
+When fine-tuning from pretrained COCO weights, use **AdamW** (or **Adan**) with a **decoupled backbone learning rate** and **auto batch sizing** to achieve convergence in 40–50 epochs:
 
 ```bash
-# -c: model config (yolox-s)
-# -d: number of devices (GPUs)
-# -b: batch size
-# --fp16: use mixed precision training
-# -o: occupy GPU memory for faster training
-yolox train -c yolox-s -d 1 -b 8 --fp16 -o
+yolox train \
+  -c yolox_s \
+  --ckpt yolox_s.pth \
+  -n my_custom_model \
+  --data-dir datasets/COCO/ \
+  -b -1 \
+  --epochs 50 \
+  --no-aug-epochs 8 \
+  --optimizer adamw \
+  --backbone-lr-ratio 0.2 \
+  --lr 0.001 \
+  --amp-dtype bfloat16 \
+  --patience 10 \
+  --cache
 ```
-Checkpoints and logs will be saved to `out/train/yolox_s/`.
+
+#### Training from Scratch with Modern Features (Recommended)
+When training from scratch (without pretrained weights), using **AdamW** with auto batch sizing and `bfloat16` reaches full convergence in **80–120 epochs** (compared to 300 epochs of SGD):
+
+```bash
+yolox train \
+  -c yolox_s \
+  -n scratch_model \
+  --data-dir datasets/COCO/ \
+  -b -1 \
+  --epochs 100 \
+  --no-aug-epochs 15 \
+  --optimizer adamw \
+  --lr 0.001 \
+  --amp-dtype bfloat16 \
+  --patience 15 \
+  --cache
+```
+
+#### Legacy Training from Scratch (SGD, 300 Epochs)
+To train from scratch using traditional YOLOX SGD:
+
+```bash
+yolox train \
+  -c yolox_s \
+  -n legacy_sgd_model \
+  --data-dir datasets/COCO/ \
+  -b 64 \
+  --epochs 300 \
+  --no-aug-epochs 30 \
+  --optimizer sgd \
+  --amp-dtype float16 \
+  --cache
+```
+
+#### Key Training Parameters
+| Flag | Description | Default |
+| :--- | :--- | :--- |
+| `-b, --batch-size` | Batch size per GPU (`-1` automatically probes optimal batch size for VRAM) | `64` |
+| `--optimizer` | Optimizer type: `sgd`, `adamw`, or `adan` | `sgd` |
+| `--backbone-lr-ratio`| Learning rate multiplier for backbone feature extractor | `1.0` |
+| `--lr` | Base learning rate | `0.01/64` per img |
+| `--amp-dtype` | Mixed precision format: `float16` or `bfloat16` | `float16` |
+| `--patience` | Early stopping patience in epochs (`0` disables) | `0` |
+| `--decision-metric` | Metric used to pick best checkpoint: `ap50_95` or `ap50` | `ap50_95` |
+| `--no-aug-epochs` | Epochs at the end to disable mosaic augmentation | `15` |
+| `--cache` | Cache images to `ram` or `disk` for maximum throughput | `None` |
+
+Checkpoints and logs will be saved to `out/train/{name}/`. Alongside model checkpoints, the evaluation engine will automatically save `f1_vs_threshold.png` and `pr_vs_threshold.png`.
 
 For a full list of training options:
 ```bash

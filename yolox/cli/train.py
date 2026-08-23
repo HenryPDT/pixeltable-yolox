@@ -310,7 +310,10 @@ def convert_args_to_config_opts(args):
     if args.epochs is not None:
         config_opts['max_epoch'] = str(args.epochs)
     if args.lr is not None:
-        config_opts['basic_lr_per_img'] = str(args.lr)
+        if getattr(args, "optimizer", None) in ["adamw", "adan"]:
+            config_opts['base_lr'] = str(args.lr)
+        else:
+            config_opts['basic_lr_per_img'] = str(args.lr)
     if args.weight_decay is not None:
         config_opts['weight_decay'] = str(args.weight_decay)
     if args.warmup_epochs is not None:

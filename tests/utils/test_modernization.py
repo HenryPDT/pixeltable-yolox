@@ -164,3 +164,19 @@ class TestModernizationFeatures(unittest.TestCase):
             else:
                 # Head should be 0.005 * 1.0 = 0.005
                 assert abs(g["lr"] - 0.005) < 1e-6
+
+    def test_cli_lr_mapping_for_adamw(self):
+        """Verify that CLI --lr maps to base_lr for adamw/adan and basic_lr_per_img for sgd."""
+        from yolox.cli.train import make_parser, convert_args_to_config_opts
+
+        parser = make_parser()
+        args_adamw = parser.parse_args(["-c", "yolox_s", "--optimizer", "adamw", "--lr", "0.001", "--backbone-lr-ratio", "0.2"])
+        opts = convert_args_to_config_opts(args_adamw)
+        assert opts["base_lr"] == "0.001"
+        assert "basic_lr_per_img" not in opts
+
+        args_sgd = parser.parse_args(["-c", "yolox_s", "--optimizer", "sgd", "--lr", "0.00015625"])
+        opts_sgd = convert_args_to_config_opts(args_sgd)
+        assert opts_sgd["basic_lr_per_img"] == "0.00015625"
+        assert "base_lr" not in opts_sgd
+

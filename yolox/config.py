@@ -58,9 +58,9 @@ class YoloxConfig:
 
     # --------------- transform config ----------------- #
     # prob of applying mosaic aug
-    mosaic_prob: float = 1.0
+    mosaic_prob: float = 0.8
     # prob of applying mixup aug
-    mixup_prob: float = 1.0
+    mixup_prob: float = 0.0
     # rotation angle range, for example, if set to 2, the true range is (-2, 2)
     degrees: float = 10.0
     # translate range, for example, if set to 0.1, the true range is (-0.1, 0.1)
@@ -77,7 +77,7 @@ class YoloxConfig:
     # These are applied after mosaic/mixup, before final preprocessing.
     # Set probability to 0.0 to disable any specific augmentation.
     # -- Core augmentations (replaces legacy augment_hsv + _mirror) --
-    aug_hsv_prob: float = 1.0       # HSV color augmentation probability
+    aug_hsv_prob: float = 0.5       # HSV color augmentation probability
     aug_hflip_prob: float = 0.5     # horizontal flip probability
     # -- Additional pixel-level augmentations --
     aug_blur_prob: float = 0.01
@@ -88,9 +88,9 @@ class YoloxConfig:
     aug_coarse_dropout_prob: float = 0.0
     # -- Additional spatial augmentations --
     aug_vflip_prob: float = 0.0
-    aug_rotate90_prob: float = 0.0
-    aug_rotation_degree: float = 0.0
-    aug_rotation_prob: float = 0.0
+    aug_rotate90_prob: float = 0.05
+    aug_rotation_degree: float = 10.0
+    aug_rotation_prob: float = 0.05
 
     # --------------  training config --------------------- #
     # epoch number used for warmup

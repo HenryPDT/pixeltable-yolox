@@ -180,15 +180,15 @@ Examples:
     )
     data_group.add_argument(
         "--mosaic-prob", type=float, default=None,
-        help="Probability of applying mosaic augmentation (default: 1.0)"
+        help="Probability of applying mosaic augmentation (default: 0.8)"
     )
     data_group.add_argument(
         "--mixup-prob", type=float, default=None,
-        help="Probability of applying mixup augmentation (default: 1.0)"
+        help="Probability of applying mixup augmentation (default: 0.0)"
     )
     data_group.add_argument(
         "--hsv-prob", type=float, default=None,
-        help="Probability of applying HSV augmentation (default: 1.0)"
+        help="Probability of applying HSV augmentation (default: 0.5)"
     )
     data_group.add_argument(
         "--flip-prob", type=float, default=None,
@@ -224,15 +224,15 @@ Examples:
     )
     data_group.add_argument(
         "--rotate90-prob", type=float, default=None,
-        help="Probability of applying 90-degree rotation augmentation (default: 0.0)"
+        help="Probability of applying 90-degree rotation augmentation (default: 0.05)"
     )
     data_group.add_argument(
         "--rotation-prob", type=float, default=None,
-        help="Probability of applying random rotation augmentation (default: 0.0)"
+        help="Probability of applying random rotation augmentation (default: 0.05)"
     )
     data_group.add_argument(
         "--rotation-degree", type=float, default=None,
-        help="Max rotation degree for random rotation (default: 0.0)"
+        help="Max rotation degree for random rotation (default: 10.0)"
     )
     data_group.add_argument(
         '--random-size', type=str, nargs='?', default=None, const='none',

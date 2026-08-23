@@ -21,6 +21,7 @@ from yolox.utils import (
     adjust_status,
     all_reduce_norm,
     analyze_dataset_stats,
+    auto_batch_size,
     get_local_rank,
     get_model_info,
     get_rank,
@@ -46,8 +47,19 @@ class Trainer:
 
         # training related attr
         self.max_epoch = config.max_epoch
-        self.amp_training = args.fp16
-        self.scaler = torch.amp.GradScaler('cuda', enabled=args.fp16)
+        amp_dtype_str = getattr(args, "amp_dtype", None) or getattr(config, "amp_dtype", "float16")
+        if amp_dtype_str == "bfloat16":
+            if torch.cuda.is_available() and not torch.cuda.is_bf16_supported():
+                logger.warning("bfloat16 not supported on this GPU architecture, falling back to float16")
+                self.amp_dtype = "float16"
+            else:
+                self.amp_dtype = "bfloat16"
+        else:
+            self.amp_dtype = "float16"
+
+        self.amp_training = getattr(args, "fp16", False) or (self.amp_dtype == "bfloat16")
+        # bfloat16 has full FP32 dynamic range and does not require loss scaling
+        self.scaler = torch.amp.GradScaler('cuda', enabled=(self.amp_training and self.amp_dtype == "float16"))
         self.is_distributed = get_world_size() > 1
         self.rank = get_rank()
         self.local_rank = get_local_rank()
@@ -57,11 +69,12 @@ class Trainer:
         self.grad_accum_steps = max(config.grad_accum_steps, 1)
         self.clip_max_norm = config.clip_max_norm
         self.early_stopping_patience = config.early_stopping_patience
+        self.decision_metric = getattr(config, "decision_metric", "ap50_95")
         self._early_stopping_counter = 0
         self._stop_training = False
 
         # data/dataloader related attr
-        self.data_type = torch.float16 if args.fp16 else torch.float32
+        self.data_type = torch.float16 if (self.amp_training and self.amp_dtype == "float16") else torch.float32
         self.input_size = config.input_size
         self.best_ap = 0
 
@@ -113,7 +126,8 @@ class Trainer:
         inps, targets = self.exp.preprocess(inps, targets, self.input_size)
         data_end_time = time.time()
 
-        with torch.amp.autocast('cuda', enabled=self.amp_training):
+        torch_amp_dtype = torch.bfloat16 if self.amp_dtype == "bfloat16" else torch.float16
+        with torch.amp.autocast('cuda', enabled=self.amp_training, dtype=torch_amp_dtype):
             outputs = self.model(inps, targets)
 
         loss = outputs["total_loss"]
@@ -138,15 +152,15 @@ class Trainer:
             if self.use_model_ema:
                 self.ema_model.update(self.model)
 
-        lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
+        base_lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
         for param_group in self.optimizer.param_groups:
-            param_group["lr"] = lr
+            param_group["lr"] = base_lr * param_group.get("lr_multiplier", 1.0)
 
         iter_end_time = time.time()
         self.meter.update(
             iter_time=iter_end_time - iter_start_time,
             data_time=data_end_time - iter_start_time,
-            lr=lr,
+            lr=base_lr,
             **outputs,
         )
 
@@ -177,6 +191,16 @@ class Trainer:
                 delattr(self.exp, 'model')
 
         logger.info("exp value:\n{}".format(self.exp))
+
+        # Auto batch size probing if requested
+        if self.args.batch_size == -1:
+            self.args.batch_size = auto_batch_size(
+                self.exp,
+                device=self.device,
+                is_distributed=self.is_distributed,
+                amp_enabled=self.amp_training,
+                amp_dtype=self.amp_dtype,
+            )
 
         # model related init
         torch.cuda.set_device(self.local_rank)
@@ -210,14 +234,16 @@ class Trainer:
         # max_iter means iters per epoch
         self.max_iter = len(self.train_loader)
 
-        self.lr_scheduler = self.exp.get_lr_scheduler(
-            self.exp.basic_lr_per_img * self.args.batch_size, self.max_iter
-        )
+        base_lr = self.exp.base_lr if self.exp.base_lr is not None else self.exp.basic_lr_per_img * self.args.batch_size
+        self.lr_scheduler = self.exp.get_lr_scheduler(base_lr, self.max_iter)
         logger.info("LR scheduler initialized.")
         if self.args.occupy:
             occupy_mem(self.local_rank)
 
         if self.is_distributed:
+            if self.args.batch_size < 4 and torch.cuda.is_available():
+                model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+                logger.info("Converted BatchNorm to SyncBatchNorm for small batch DDP (<4)")
             model = DDP(model, device_ids=[self.local_rank], broadcast_buffers=False)
 
         if self.use_model_ema:
@@ -457,8 +483,9 @@ class Trainer:
                 evalmodel, self.evaluator, self.is_distributed, return_outputs=True
             )
 
-        update_best_ckpt = ap50_95 > self.best_ap
-        self.best_ap = max(self.best_ap, ap50_95)
+        decision_score = ap50 if self.decision_metric == "ap50" else ap50_95
+        update_best_ckpt = decision_score > self.best_ap
+        self.best_ap = max(self.best_ap, decision_score)
 
         # Early stopping logic
         if self.early_stopping_patience > 0:
@@ -475,7 +502,7 @@ class Trainer:
                     if self.rank == 0:
                         logger.info(
                             f"Early stopping triggered after {self._early_stopping_counter} "
-                            f"epochs without improvement. Best AP: {self.best_ap:.4f}"
+                            f"epochs without improvement. Best metric: {self.best_ap:.4f}"
                         )
                     self._stop_training = True
 
@@ -501,9 +528,9 @@ class Trainer:
             logger.info("\n" + summary)
         synchronize()
 
-        self.save_ckpt("last_epoch", update_best_ckpt, ap=ap50_95)
+        self.save_ckpt("last_epoch", update_best_ckpt, ap=decision_score)
         if self.save_history_ckpt:
-            self.save_ckpt(f"epoch_{self.epoch + 1}", ap=ap50_95)
+            self.save_ckpt(f"epoch_{self.epoch + 1}", ap=decision_score)
 
         if self.args.logger == "mlflow":
             metadata = {
@@ -520,12 +547,31 @@ class Trainer:
         if self.rank == 0:
             save_model = self.ema_model.ema if self.use_model_ema else self.model
             logger.info("Save weights to {}".format(self.file_name))
+
+            base_dataset = self.exp.dataset
+            if isinstance(base_dataset, (ConcatDataset, MixConcatDataset)):
+                base_dataset = base_dataset.datasets[0]
+            class_names = getattr(base_dataset, "class_ids", None) or getattr(base_dataset, "_classes", None)
+
+            meta = {
+                "model_name": self.exp.name,
+                "num_classes": self.exp.num_classes,
+                "class_names": list(class_names) if class_names is not None else None,
+                "input_size": list(self.exp.input_size),
+                "depth": self.exp.depth,
+                "width": self.exp.width,
+                "act": self.exp.act,
+                "depthwise": self.exp.depthwise,
+                "decision_metric": self.decision_metric,
+            }
+
             ckpt_state = {
                 "start_epoch": self.epoch + 1,
                 "model": save_model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
                 "best_ap": self.best_ap,
                 "curr_ap": ap,
+                "meta": meta,
             }
             save_checkpoint(
                 ckpt_state,

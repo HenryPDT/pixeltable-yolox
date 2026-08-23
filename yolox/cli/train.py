@@ -162,6 +162,22 @@ Examples:
         "--seed", type=int, default=None,
         help="Deterministic training seed (default: None)"
     )
+    training_group.add_argument(
+        "--optimizer", type=str, choices=["sgd", "adamw", "adan"], default=None,
+        help="Optimizer type: 'sgd', 'adamw', or 'adan' (default: sgd)"
+    )
+    training_group.add_argument(
+        "--backbone-lr-ratio", type=float, default=None,
+        help="Backbone learning rate multiplier for fine-tuning, e.g. 0.2 (default: 1.0)"
+    )
+    training_group.add_argument(
+        "--amp-dtype", type=str, choices=["float16", "bfloat16"], default=None,
+        help="Mixed precision precision type: 'float16' or 'bfloat16' (default: float16)"
+    )
+    training_group.add_argument(
+        "--decision-metric", type=str, choices=["ap50_95", "ap50"], default=None,
+        help="Metric used to select best checkpoint: 'ap50_95' or 'ap50' (default: ap50_95)"
+    )
 
     # Data parameters
     data_group = parser.add_argument_group('Data Parameters', 'Dataset and augmentation parameters')
@@ -369,6 +385,14 @@ def convert_args_to_config_opts(args):
         config_opts['early_stopping_patience'] = str(args.patience)
     if args.seed is not None:
         config_opts['seed'] = str(args.seed)
+    if args.optimizer is not None:
+        config_opts['opt_type'] = str(args.optimizer)
+    if args.backbone_lr_ratio is not None:
+        config_opts['backbone_lr_ratio'] = str(args.backbone_lr_ratio)
+    if args.amp_dtype is not None:
+        config_opts['amp_dtype'] = str(args.amp_dtype)
+    if args.decision_metric is not None:
+        config_opts['decision_metric'] = str(args.decision_metric)
     
     # Handle multi-scale training arguments - process both independently
     if args.random_size is not None:

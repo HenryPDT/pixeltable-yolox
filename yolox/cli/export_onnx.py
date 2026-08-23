@@ -32,29 +32,29 @@ def yolox_export(weights: str, config_str: str) -> (nn.Module, YoloxConfig):
     Loads a pixeltable-yolox model and prepares it for ONNX export.
     """
     config = resolve_config(config_str)
-    
+
     # Load the checkpoint to detect num_classes before creating the model
     print('Loading checkpoint to detect model configuration...')
     checkpoint = torch.load(weights, map_location='cpu', weights_only=False)
-    
+
     # Extract num_classes from the checkpoint by looking at the classification head
     # The cls_preds layers have shape [num_classes, ...], so we can get num_classes from there
     model_state = checkpoint.get('model', checkpoint)
-    
+
     # Look for the first classification prediction layer to get num_classes
     cls_pred_key = None
     for key in model_state.keys():
         if 'head.cls_preds.0.weight' in key:
             cls_pred_key = key
             break
-    
+
     if cls_pred_key is None:
         raise ValueError("Could not find classification prediction layer in checkpoint to detect num_classes")
-    
+
     # Get num_classes from the shape of the classification layer
     detected_num_classes = model_state[cls_pred_key].shape[0]
     print(f'Auto-detected num_classes: {detected_num_classes}')
-    
+
     # Update config with detected num_classes before creating the model
     config.num_classes = detected_num_classes
 

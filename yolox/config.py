@@ -131,6 +131,8 @@ class YoloxConfig:
     amp_dtype: Literal["float16", "bfloat16"] = "float16"
     # metric used for selecting the best checkpoint: "ap50_95" | "ap50"
     decision_metric: Literal["ap50_95", "ap50"] = "ap50_95"
+    # interval in iterations for multi-scale random resizing (1 = every batch for maximum scale invariance)
+    random_resize_interval: int = 1
     # log period in iter, for example,
     # if set to 1, user could see log every iteration.
     print_interval: int = 10
@@ -402,13 +404,19 @@ class YoloxConfig:
             else:
                 lr = self.basic_lr_per_img * batch_size
 
+            # For AdamW, if weight decay was left at the SGD default (5e-4),
+            # adopt the canonical 0.05 decoupled weight decay (RTMDet / MMYOLO / D-FINE).
+            wd = self.weight_decay
+            if self.opt_type == "adamw" and wd == 5e-4:
+                wd = 0.05
+
             self.optimizer = build_yolox_optimizer(
                 self.model,
                 optimizer_type=self.opt_type,
                 base_lr=lr,
                 backbone_lr_ratio=self.backbone_lr_ratio,
                 momentum=self.momentum,
-                weight_decay=self.weight_decay,
+                weight_decay=wd,
             )
 
         return self.optimizer

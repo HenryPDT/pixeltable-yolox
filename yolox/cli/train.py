@@ -258,6 +258,10 @@ Examples:
         '--multiscale-range', type=int, default=None,
         help="Simple multi-scale range factor (e.g., 5). Used if random-size is not set."
     )
+    data_group.add_argument(
+        '--resize-interval', '--random-resize-interval', type=int, default=None,
+        help="Interval in iterations for multi-scale random resizing, e.g. 1 for every batch (default: 1)"
+    )
 
     # Model parameters
     model_group = parser.add_argument_group('Model Parameters', 'Model architecture parameters')
@@ -412,6 +416,8 @@ def convert_args_to_config_opts(args):
     
     if args.multiscale_range is not None:
         config_opts['multiscale_range'] = str(args.multiscale_range)
+    if args.resize_interval is not None:
+        config_opts['random_resize_interval'] = str(args.resize_interval)
     
     # Model parameters
     if args.depth is not None:

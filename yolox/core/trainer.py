@@ -426,7 +426,8 @@ class Trainer:
 
         # random resizing
         if not self.exp.deterministic:
-            if (self.progress_in_iter + 1) % 10 == 0:
+            resize_interval = getattr(self.exp, "random_resize_interval", 1)
+            if (self.progress_in_iter + 1) % resize_interval == 0:
                 self.input_size = self.exp.random_resize(
                     self.train_loader, self.epoch, self.rank, self.is_distributed
                 )

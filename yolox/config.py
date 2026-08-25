@@ -470,7 +470,7 @@ class YoloxConfig:
 
         return val_loader
 
-    def get_evaluator(self, batch_size, is_distributed, testdev=False, legacy=False):
+    def get_evaluator(self, batch_size, is_distributed, testdev=False, legacy=False, save_dir=None):
         from yolox.evaluators import CocoEvaluator
 
         return CocoEvaluator(
@@ -481,7 +481,7 @@ class YoloxConfig:
             nmsthre=self.nmsthre,
             num_classes=self.num_classes,
             testdev=testdev,
-            save_dir=self.output_dir,
+            save_dir=save_dir if save_dir is not None else self.output_dir,
         )
 
     def get_trainer(self, args):

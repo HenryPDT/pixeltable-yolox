@@ -77,6 +77,7 @@ class Trainer:
         self.data_type = torch.float16 if (self.amp_training and self.amp_dtype == "float16") else torch.float32
         self.input_size = config.input_size
         self.best_ap = 0
+        self.best_epoch = 0
 
         # metric record
         self.meter = MeterBuffer(window_size=config.print_interval)
@@ -254,7 +255,7 @@ class Trainer:
 
         logger.info("Building validation evaluator / dataloader...")
         self.evaluator = self.exp.get_evaluator(
-            batch_size=self.args.batch_size, is_distributed=self.is_distributed
+            batch_size=self.args.batch_size, is_distributed=self.is_distributed, save_dir=self.file_name
         )
         logger.info("Evaluator ready.")
 
@@ -314,9 +315,14 @@ class Trainer:
             logger.info(f"Early stopping enabled with patience={self.early_stopping_patience} epochs")
 
     def after_train(self):
-        logger.info(
-            "Training of experiment is done and the best AP is {:.2f}".format(self.best_ap * 100)
-        )
+        if self.best_epoch > 0:
+            logger.info(
+                f"Training of experiment is done and the best AP is {self.best_ap * 100:.2f} (mAP: {self.best_ap:.4f}) achieved at epoch {self.best_epoch}"
+            )
+        else:
+            logger.info(
+                "Training of experiment is done and the best AP is {:.2f}".format(self.best_ap * 100)
+            )
         if self.rank == 0:
             if self.args.logger == "wandb":
                 self.wandb_logger.finish()
@@ -449,6 +455,7 @@ class Trainer:
             model.load_state_dict(ckpt["model"])
             self.optimizer.load_state_dict(ckpt["optimizer"])
             self.best_ap = ckpt.pop("best_ap", 0)
+            self.best_epoch = ckpt.pop("best_epoch", 0)
             # resume the training states variables
             start_epoch = (
                 self.args.start_epoch - 1
@@ -486,7 +493,9 @@ class Trainer:
 
         decision_score = ap50 if self.decision_metric == "ap50" else ap50_95
         update_best_ckpt = decision_score > self.best_ap
-        self.best_ap = max(self.best_ap, decision_score)
+        if update_best_ckpt:
+            self.best_ap = decision_score
+            self.best_epoch = self.epoch + 1
 
         # Early stopping logic
         if self.early_stopping_patience > 0:
@@ -571,6 +580,7 @@ class Trainer:
                 "model": save_model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
                 "best_ap": self.best_ap,
+                "best_epoch": self.best_epoch,
                 "curr_ap": ap,
                 "meta": meta,
             }

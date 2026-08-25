@@ -66,6 +66,20 @@ def find_best_confidence_threshold(
         logger.warning("No evaluation data available for confidence threshold analysis")
         return None
 
+    # Filter eval_imgs to only area_idx == 0 ('all' area range) to prevent double counting
+    params = getattr(coco_eval, "params", None)
+    if params is not None:
+        num_cats = len(getattr(params, "catIds", []))
+        num_area = len(getattr(params, "areaRng", []))
+        num_imgs = len(getattr(params, "imgIds", []))
+        if num_cats > 0 and num_area > 0 and num_imgs > 0 and len(eval_imgs) == num_cats * num_area * num_imgs:
+            filtered_eval_imgs = []
+            for cat_i in range(num_cats):
+                for img_i in range(num_imgs):
+                    idx = cat_i * num_area * num_imgs + 0 * num_imgs + img_i
+                    filtered_eval_imgs.append(eval_imgs[idx])
+            eval_imgs = filtered_eval_imgs
+
     # Collect all detection scores and match info
     all_gt_count = 0
     per_threshold_tp = {t: 0 for t in thresholds}

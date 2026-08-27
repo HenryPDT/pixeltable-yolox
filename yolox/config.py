@@ -32,8 +32,6 @@ class YoloxConfig:
 
     seed: Optional[Any] = None
     output_dir: str = "./out"
-    print_interval: int = 100
-    eval_interval: int = 10
 
     # ---------------- dataloader config ---------------- #
     # deterministic data loading
@@ -131,8 +129,8 @@ class YoloxConfig:
     amp_dtype: Literal["float16", "bfloat16"] = "float16"
     # metric used for selecting the best checkpoint: "ap50_95" | "ap50"
     decision_metric: Literal["ap50_95", "ap50"] = "ap50_95"
-    # interval in iterations for multi-scale random resizing (1 = every batch for maximum scale invariance)
-    random_resize_interval: int = 1
+    # interval in iterations for multi-scale random resizing (default: 10, matching standard YOLOX)
+    random_resize_interval: int = 10
     # log period in iter, for example,
     # if set to 1, user could see log every iteration.
     print_interval: int = 10
@@ -161,6 +159,27 @@ class YoloxConfig:
     def validate(self):
         h, w = self.input_size
         assert h % 32 == 0 and w % 32 == 0, "input size must be multiples of 32"
+        assert self.print_interval > 0, "print_interval must be positive"
+        assert self.eval_interval > 0, "eval_interval must be positive"
+        assert self.random_resize_interval > 0, "random_resize_interval must be positive"
+        assert self.grad_accum_steps > 0, "grad_accum_steps must be positive"
+        for prob_name in (
+            "mosaic_prob",
+            "mixup_prob",
+            "aug_hsv_prob",
+            "aug_hflip_prob",
+            "aug_blur_prob",
+            "aug_noise_prob",
+            "aug_gamma_prob",
+            "aug_brightness_prob",
+            "aug_to_gray_prob",
+            "aug_coarse_dropout_prob",
+            "aug_vflip_prob",
+            "aug_rotate90_prob",
+            "aug_rotation_prob",
+        ):
+            prob = getattr(self, prob_name)
+            assert 0.0 <= prob <= 1.0, f"{prob_name} must be in [0, 1]"
 
     def update(self, opts: dict[str, str]):
         for k, v in opts.items():
@@ -390,6 +409,24 @@ class YoloxConfig:
             targets[..., 2::2] = targets[..., 2::2] * scale_y
         return inputs, targets
 
+    def get_base_lr(self, batch_size: Optional[int] = None) -> float:
+        """Compute the base (peak) learning rate for optimizer and scheduler.
+
+        - If `base_lr` is explicitly configured, use it directly.
+        - If using AdamW or Adan without explicit base_lr, default to 0.001
+          (canonical base LR for modern adaptive optimizers on CNN detectors).
+        - If using SGD, apply the linear scaling rule: basic_lr_per_img * effective_batch_size,
+          where effective_batch_size = batch_size * grad_accum_steps.
+        """
+        if self.base_lr is not None:
+            return self.base_lr
+        if self.opt_type in ["adamw", "adan"]:
+            return 0.001
+
+        bs = batch_size if batch_size is not None else 64
+        effective_batch = bs * max(self.grad_accum_steps, 1)
+        return self.basic_lr_per_img * effective_batch
+
     def get_optimizer(self, batch_size):
         if "optimizer" not in self.__dict__:
             from yolox.utils.optimizers import build_yolox_optimizer
@@ -397,18 +434,14 @@ class YoloxConfig:
             if getattr(self, "model", None) is None:
                 self.get_model()
 
-            if self.base_lr is not None:
-                lr = self.base_lr
-            elif self.warmup_epochs > 0:
-                lr = self.warmup_lr
-            else:
-                lr = self.basic_lr_per_img * batch_size
+            lr = self.get_base_lr(batch_size)
 
-            # For AdamW, if weight decay was left at the SGD default (5e-4),
-            # adopt the canonical 0.05 decoupled weight decay (RTMDet / MMYOLO / D-FINE).
+            # Auto-adapt weight decay for decoupled optimizers if left at SGD default (5e-4)
             wd = self.weight_decay
             if self.opt_type == "adamw" and wd == 5e-4:
                 wd = 0.05
+            elif self.opt_type == "adan" and wd == 5e-4:
+                wd = 0.02
 
             self.optimizer = build_yolox_optimizer(
                 self.model,
@@ -454,9 +487,9 @@ class YoloxConfig:
 
         if is_distributed:
             batch_size = batch_size // dist.get_world_size()
-            sampler = torch.utils.data.distributed.DistributedSampler(
-                valdataset, shuffle=False
-            )
+            from yolox.data.samplers import DistributedEvalSampler
+
+            sampler = DistributedEvalSampler(valdataset)
         else:
             sampler = torch.utils.data.SequentialSampler(valdataset)
 

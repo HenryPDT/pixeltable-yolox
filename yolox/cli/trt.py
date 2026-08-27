@@ -10,6 +10,7 @@ import torch
 from torch2trt import torch2trt
 
 from yolox.exp import get_exp
+from yolox.utils import get_deployable_state_dict
 
 
 def make_parser():
@@ -51,7 +52,7 @@ def main():
     ckpt = torch.load(ckpt_file, map_location="cpu", weights_only=False)
     # load the model state dict
 
-    model.load_state_dict(ckpt["model"])
+    model.load_state_dict(get_deployable_state_dict(ckpt))
     logger.info("loaded checkpoint done.")
     model.eval()
     model.cuda()

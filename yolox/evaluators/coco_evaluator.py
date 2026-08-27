@@ -140,6 +140,7 @@ class CocoEvaluator:
         self.per_class_AP = per_class_AP
         self.per_class_AR = per_class_AR
         self.save_dir = save_dir
+        self._last_threshold_result = None
 
     def evaluate(
         self, model, distributed=False, half=False, trt_file=None,
@@ -284,6 +285,7 @@ class CocoEvaluator:
         if not is_main_process():
             return 0, 0, None
 
+        self._last_threshold_result = None
         logger.info("Evaluate in main process...")
 
         annType = ["segm", "bbox", "keypoints"]
@@ -354,6 +356,7 @@ class CocoEvaluator:
                     coco_dt=cocoDt,
                 )
                 if threshold_result is not None:
+                    self._last_threshold_result = threshold_result
                     info += (
                         f"\nBest confidence threshold: {threshold_result['best_threshold']:.2f} "
                         f"(F1={threshold_result['best_f1']:.4f})\n"
@@ -364,3 +367,4 @@ class CocoEvaluator:
             return cocoEval.stats[0], cocoEval.stats[1], info
         else:
             return 0, 0, info
+

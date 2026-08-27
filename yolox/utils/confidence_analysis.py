@@ -92,6 +92,7 @@ def find_best_confidence_threshold(
 
         dt_scores = eval_img.get("dtScores", [])
         dt_matches = eval_img.get("dtMatches", None)  # [T x D] array
+        dt_ignore = eval_img.get("dtIgnore", None)
         gt_ignore = eval_img.get("gtIgnore", [])
 
         # Count non-ignored GTs
@@ -103,14 +104,23 @@ def find_best_confidence_threshold(
 
         # dt_matches shape: [num_iou_thresholds x num_detections]
         # Use first IoU threshold (0.50) for matching
-        if dt_matches.ndim == 1:
+        if hasattr(dt_matches, "ndim") and dt_matches.ndim == 1:
             matches_at_iou50 = dt_matches
         else:
             matches_at_iou50 = dt_matches[0]  # IoU = 0.50
 
+        if dt_ignore is not None and hasattr(dt_ignore, "ndim") and dt_ignore.ndim == 2:
+            ignore_at_iou50 = dt_ignore[0]
+        elif dt_ignore is not None:
+            ignore_at_iou50 = dt_ignore
+        else:
+            ignore_at_iou50 = None
+
         for det_idx, score in enumerate(dt_scores):
             if det_idx >= len(matches_at_iou50):
                 break
+            if ignore_at_iou50 is not None and det_idx < len(ignore_at_iou50) and ignore_at_iou50[det_idx]:
+                continue
             is_tp = matches_at_iou50[det_idx] > 0
 
             for thresh in thresholds:

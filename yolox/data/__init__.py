@@ -9,4 +9,4 @@ from .dataloading import (
     worker_init_reset_seed,
 )
 from .datasets import *
-from .samplers import InfiniteSampler, YoloBatchSampler
+from .samplers import DistributedEvalSampler, InfiniteSampler, YoloBatchSampler

@@ -13,7 +13,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from yolox.config import YoloxConfig
 from yolox.core import launch
-from yolox.utils import configure_module, configure_nccl, fuse_model, get_local_rank, get_model_info, setup_logger
+from yolox.utils import configure_module, configure_nccl, fuse_model, get_deployable_state_dict, get_local_rank, get_model_info, setup_logger
 
 from .utils import parse_model_config_opts, resolve_config, get_unique_output_name
 
@@ -154,11 +154,14 @@ def eval(config: YoloxConfig, args, num_gpu):
         logger.info("loading checkpoint from {}".format(ckpt_file))
         loc = "cuda:{}".format(rank)
         ckpt = torch.load(ckpt_file, map_location=loc, weights_only=False)
-        model.load_state_dict(ckpt["model"])
+        model.load_state_dict(get_deployable_state_dict(ckpt))
         logger.info("loaded checkpoint done.")
 
     if is_distributed:
-        model = DDP(model, device_ids=[rank])
+        # Non-padding evaluation shards can contain different batch counts.
+        # Disable per-forward buffer broadcasts so a shorter rank can finish
+        # without waiting for a rank that has already entered result gathering.
+        model = DDP(model, device_ids=[rank], broadcast_buffers=False)
 
     if args.fuse:
         logger.info("\tFusing model...")

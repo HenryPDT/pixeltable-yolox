@@ -6,6 +6,13 @@ from loguru import logger
 import torch
 
 
+def get_deployable_state_dict(ckpt):
+    """Return deployable model weights from a training checkpoint."""
+    if isinstance(ckpt, dict) and "model" in ckpt:
+        return ckpt["model"]
+    return ckpt
+
+
 def load_ckpt(model, ckpt):
     model_state_dict = model.state_dict()
     load_dict = {}

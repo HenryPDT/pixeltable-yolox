@@ -3,7 +3,7 @@
 from .allreduce_norm import *
 from .auto_batch import auto_batch_size
 from .boxes import *
-from .checkpoint import load_ckpt, save_checkpoint
+from .checkpoint import get_deployable_state_dict, load_ckpt, save_checkpoint
 from .compat import meshgrid
 from .confidence_analysis import find_best_confidence_threshold
 from .dataset_stats import analyze_dataset_stats, log_dataset_stats

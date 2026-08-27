@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 
 from yolox.config import YoloxConfig
+from yolox.utils import get_deployable_state_dict
 from yolox.models.processor import Detections, YoloxProcessor
 
 from .yolo_head import YoloxHead
@@ -116,7 +117,7 @@ class YoloxModule(nn.Module):
         model.head.training = False
         model.training = False
         weights = torch.load(path, map_location=torch.device(device), weights_only=False)
-        model.load_state_dict(weights['model'])
+        model.load_state_dict(get_deployable_state_dict(weights))
         return model
 
     @classmethod

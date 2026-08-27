@@ -20,6 +20,7 @@ from yolox.data.datasets import COCO_CLASSES
 from yolox.utils import (
     configure_module,
     fuse_model,
+    get_deployable_state_dict,
     get_model_info,
     postprocess,
     vis,
@@ -480,7 +481,7 @@ def main(argv: list[str]) -> None:
         import torch
         logger.info("loading checkpoint from {}", args.weights)
         ckpt = torch.load(args.weights, map_location="cpu", weights_only=False)
-        model_state = ckpt.get('model', ckpt)
+        model_state = get_deployable_state_dict(ckpt)
         cls_pred_key = None
         for key in model_state.keys():
             if 'head.cls_preds.0.weight' in key:
@@ -499,7 +500,7 @@ def main(argv: list[str]) -> None:
             if args.fp16:
                 model.half()
         model.eval()
-        model.load_state_dict(ckpt.get("model", ckpt))
+        model.load_state_dict(get_deployable_state_dict(ckpt))
         predictor = Predictor(
             model,
             config,

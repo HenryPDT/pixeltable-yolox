@@ -24,6 +24,7 @@ __all__ = [
     "tensor2pyobj",
     "all_reduce",
     "all_reduce_norm",
+    "average_gradients",
 ]
 
 
@@ -99,3 +100,18 @@ def all_reduce_norm(module):
     states = get_async_norm_states(module)
     states = all_reduce(states, op="mean")
     module.load_state_dict(states, strict=False)
+
+
+def average_gradients(module):
+    """Average parameter gradients across ranks.
+
+    Uses SUM then divide so both NCCL and Gloo work. ``ReduceOp.AVG`` is not
+    supported by the Gloo backend.
+    """
+    world_size = get_world_size()
+    if world_size < 2:
+        return
+    for param in module.parameters():
+        if param.grad is not None:
+            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+            param.grad.div_(world_size)

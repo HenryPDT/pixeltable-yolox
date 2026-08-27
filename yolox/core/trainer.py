@@ -1,7 +1,9 @@
 import datetime
+import math
 import os
 import random
 import time
+from contextlib import nullcontext
 from loguru import logger
 
 import numpy as np
@@ -20,8 +22,10 @@ from yolox.utils import (
     WandbLogger,
     adjust_status,
     all_reduce_norm,
+    average_gradients,
     analyze_dataset_stats,
     auto_batch_size,
+    get_deployable_state_dict,
     get_local_rank,
     get_model_info,
     get_rank,
@@ -48,16 +52,22 @@ class Trainer:
         # training related attr
         self.max_epoch = config.max_epoch
         amp_dtype_str = getattr(args, "amp_dtype", None) or getattr(config, "amp_dtype", "float16")
+        explicit_amp_dtype = getattr(args, "amp_dtype", None) is not None
+        self.amp_training = bool(getattr(args, "fp16", False) or explicit_amp_dtype)
         if amp_dtype_str == "bfloat16":
             if torch.cuda.is_available() and not torch.cuda.is_bf16_supported():
-                logger.warning("bfloat16 not supported on this GPU architecture, falling back to float16")
+                logger.warning(
+                    "bfloat16 not supported on this GPU architecture, falling back to float16 AMP"
+                )
                 self.amp_dtype = "float16"
+                self.amp_training = True
             else:
                 self.amp_dtype = "bfloat16"
+                self.amp_training = True
         else:
             self.amp_dtype = "float16"
-
-        self.amp_training = getattr(args, "fp16", False) or (self.amp_dtype == "bfloat16")
+            if explicit_amp_dtype:
+                self.amp_training = True
         # bfloat16 has full FP32 dynamic range and does not require loss scaling
         self.scaler = torch.amp.GradScaler('cuda', enabled=(self.amp_training and self.amp_dtype == "float16"))
         self.is_distributed = get_world_size() > 1
@@ -72,6 +82,11 @@ class Trainer:
         self.decision_metric = getattr(config, "decision_metric", "ap50_95")
         self._early_stopping_counter = 0
         self._stop_training = False
+        self._accum_micro_steps = 0
+        self._resume_ema_state = None
+        self._resume_ema_updates = None
+        self._resume_iter = 0
+        self._last_decision_ap = None
 
         # data/dataloader related attr
         self.data_type = torch.float16 if (self.amp_training and self.amp_dtype == "float16") else torch.float32
@@ -112,7 +127,17 @@ class Trainer:
             self.after_epoch()
 
     def train_in_iter(self):
-        for self.iter in range(self.max_iter):
+        start_iter = 0
+        if self.epoch == self.start_epoch and self._resume_iter > 0:
+            start_iter = self._resume_iter
+            logger.info(
+                f"Resuming epoch {self.epoch + 1} at iter {start_iter + 1}/{self.max_iter}"
+            )
+            for _ in range(start_iter):
+                self.prefetcher.next()
+            self._resume_iter = 0
+
+        for self.iter in range(start_iter, self.max_iter):
             self.before_iter()
             self.train_one_iter()
             self.after_iter()
@@ -127,35 +152,34 @@ class Trainer:
         inps, targets = self.exp.preprocess(inps, targets, self.input_size)
         data_end_time = time.time()
 
-        torch_amp_dtype = torch.bfloat16 if self.amp_dtype == "bfloat16" else torch.float16
-        with torch.amp.autocast('cuda', enabled=self.amp_training, dtype=torch_amp_dtype):
-            outputs = self.model(inps, targets)
-
-        loss = outputs["total_loss"]
-
-        # Scale loss by accumulation steps for correct gradient magnitude
-        if self.grad_accum_steps > 1:
-            loss = loss / self.grad_accum_steps
-
-        self.scaler.scale(loss).backward()
-
-        # Only step the optimizer every grad_accum_steps iterations
-        if (self.iter + 1) % self.grad_accum_steps == 0:
-            # Gradient clipping
-            if self.clip_max_norm > 0:
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_max_norm)
-
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self.optimizer.zero_grad()
-
-            if self.use_model_ema:
-                self.ema_model.update(self.model)
-
         base_lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = base_lr * param_group.get("lr_multiplier", 1.0)
+
+        is_accum_boundary = (self.iter + 1) % self.grad_accum_steps == 0
+        use_no_sync = (
+            self.is_distributed
+            and self.grad_accum_steps > 1
+            and not is_accum_boundary
+        )
+        sync_cm = self.model.no_sync() if use_no_sync else nullcontext()
+
+        torch_amp_dtype = torch.bfloat16 if self.amp_dtype == "bfloat16" else torch.float16
+        with sync_cm:
+            with torch.amp.autocast('cuda', enabled=self.amp_training, dtype=torch_amp_dtype):
+                outputs = self.model(inps, targets)
+
+            loss = outputs["total_loss"]
+            if self.grad_accum_steps > 1:
+                loss = loss / self.grad_accum_steps
+
+            self.scaler.scale(loss).backward()
+
+        self._accum_micro_steps += 1
+
+        if is_accum_boundary:
+            self._optimizer_step()
+            self._accum_micro_steps = 0
 
         iter_end_time = time.time()
         self.meter.update(
@@ -164,6 +188,63 @@ class Trainer:
             lr=base_lr,
             **outputs,
         )
+
+    def _optimizer_step(self, trailing_micro_steps=None):
+        """Run gradient clipping, optimizer step, and EMA update on accumulation boundaries."""
+        if trailing_micro_steps is not None and trailing_micro_steps < self.grad_accum_steps:
+            scale = self.grad_accum_steps / trailing_micro_steps
+            for param in self.model.parameters():
+                if param.grad is not None:
+                    param.grad.mul_(scale)
+
+        if self.clip_max_norm > 0:
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_max_norm)
+
+        scale_before = self.scaler.get_scale()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        optimizer_stepped = (not self.scaler.is_enabled()) or (
+            self.scaler.get_scale() >= scale_before
+        )
+
+        self.optimizer.zero_grad()
+
+        if optimizer_stepped and self.use_model_ema:
+            self.ema_model.update(self.model)
+
+    def _sync_ema_model(self):
+        """Broadcast rank-0 EMA weights/buffers so distributed eval uses consistent state."""
+        if not self.use_model_ema or not self.is_distributed:
+            return
+        self._broadcast_module(self.ema_model.ema)
+
+    def _broadcast_module(self, module):
+        """Broadcast parameters and buffers from rank 0. No-op when not distributed."""
+        if not self.is_distributed:
+            return
+        import torch.distributed as dist
+
+        for param in module.parameters():
+            dist.broadcast(param.data, src=0)
+        for buffer in module.buffers():
+            dist.broadcast(buffer.data, src=0)
+
+    def _get_eval_model(self):
+        """Return the unwrapped deployable model used for evaluation."""
+        if self.use_model_ema:
+            return self.ema_model.ema
+        evalmodel = self.model
+        if is_parallel(evalmodel):
+            evalmodel = evalmodel.module
+        return evalmodel
+
+    def _infer_ema_updates(self):
+        """Legacy fallback when checkpoints omit the exact EMA update counter."""
+        if self.max_iter <= 0:
+            return 0
+        steps_per_epoch = math.ceil(self.max_iter / self.grad_accum_steps)
+        return self.start_epoch * steps_per_epoch
 
     def before_train(self):
         logger.info("args: {}".format(self.args))
@@ -192,6 +273,17 @@ class Trainer:
                 delattr(self.exp, 'model')
 
         logger.info("exp value:\n{}".format(self.exp))
+
+        if self.exp.seed is not None:
+            seed = self.exp.seed + self.rank if self.is_distributed else self.exp.seed
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            random.seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            if self.exp.deterministic:
+                torch.backends.cudnn.deterministic = True
+                torch.backends.cudnn.benchmark = False
+            logger.info(f"Set random seed to {seed} (deterministic={self.exp.deterministic})")
 
         # Auto batch size probing if requested
         if self.args.batch_size == -1:
@@ -235,8 +327,15 @@ class Trainer:
         # max_iter means iters per epoch
         self.max_iter = len(self.train_loader)
 
-        base_lr = self.exp.base_lr if self.exp.base_lr is not None else self.exp.basic_lr_per_img * self.args.batch_size
+        base_lr = (
+            self.exp.get_base_lr(self.args.batch_size)
+            if hasattr(self.exp, "get_base_lr")
+            else (self.exp.base_lr if self.exp.base_lr is not None else self.exp.basic_lr_per_img * self.args.batch_size)
+        )
         self.lr_scheduler = self.exp.get_lr_scheduler(base_lr, self.max_iter)
+        init_lr = self.lr_scheduler.update_lr(1)
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = init_lr * param_group.get("lr_multiplier", 1.0)
         logger.info("LR scheduler initialized.")
         if self.args.occupy:
             occupy_mem(self.local_rank)
@@ -249,9 +348,18 @@ class Trainer:
 
         if self.use_model_ema:
             self.ema_model = ModelEMA(model, 0.9998)
-            self.ema_model.updates = self.max_iter * self.start_epoch
+            if getattr(self, "_resume_ema_state", None) is not None:
+                self.ema_model.ema.load_state_dict(self._resume_ema_state)
+                self.ema_model.updates = (
+                    self._resume_ema_updates
+                    if self._resume_ema_updates is not None
+                    else self._infer_ema_updates()
+                )
+            else:
+                self.ema_model.updates = self._infer_ema_updates()
 
         self.model = model
+        self._accum_micro_steps = 0
 
         logger.info("Building validation evaluator / dataloader...")
         self.evaluator = self.exp.get_evaluator(
@@ -292,18 +400,6 @@ class Trainer:
         logger.info("Training start...")
         # logger.info("\n{}".format(model))
 
-        # Deterministic seeding
-        if self.exp.seed is not None:
-            seed = self.exp.seed + self.rank if self.is_distributed else self.exp.seed
-            torch.manual_seed(seed)
-            np.random.seed(seed)
-            random.seed(seed)
-            torch.cuda.manual_seed_all(seed)
-            if self.exp.deterministic:
-                torch.backends.cudnn.deterministic = True
-                torch.backends.cudnn.benchmark = False
-            logger.info(f"Set random seed to {seed} (deterministic={self.exp.deterministic})")
-
         if self.grad_accum_steps > 1:
             logger.info(
                 f"Using gradient accumulation: {self.grad_accum_steps} steps "
@@ -323,6 +419,9 @@ class Trainer:
             logger.info(
                 "Training of experiment is done and the best AP is {:.2f}".format(self.best_ap * 100)
             )
+
+        self._analyze_best_checkpoint()
+
         if self.rank == 0:
             if self.args.logger == "wandb":
                 self.wandb_logger.finish()
@@ -337,7 +436,88 @@ class Trainer:
                 self.mlflow_logger.on_train_end(self.args, file_name=self.file_name,
                                                 metadata=metadata)
 
+    def _analyze_best_checkpoint(self):
+        """Re-evaluate deployable `best_ckpt.pth` weights on every rank.
+
+        Rank-0-only eval would hang under DDP (`gather`/`synchronize`) and would
+        only see that rank's val shard. Load `model` (EMA/deployable), not
+        `model_raw`.
+        """
+        best_ckpt_path = os.path.join(self.file_name, "best_ckpt.pth")
+        should_run = torch.zeros(1, device=self.device)
+        if self.rank == 0 and os.path.isfile(best_ckpt_path):
+            should_run.fill_(1.0)
+        if self.is_distributed:
+            import torch.distributed as dist
+
+            dist.broadcast(should_run, src=0)
+        if should_run.item() < 1.0:
+            return
+
+        evalmodel = self._get_eval_model()
+        load_ok = torch.ones(1, device=self.device)
+        if self.rank == 0:
+            logger.info(
+                f"Running final threshold analysis on BEST checkpoint "
+                f"(Epoch {self.best_epoch})..."
+            )
+            try:
+                ckpt = torch.load(best_ckpt_path, map_location=self.device, weights_only=False)
+                load_ckpt(evalmodel, get_deployable_state_dict(ckpt))
+            except Exception as e:
+                logger.warning(f"Failed to load best checkpoint for final analysis: {e}")
+                load_ok.zero_()
+        if self.is_distributed:
+            import torch.distributed as dist
+
+            dist.broadcast(load_ok, src=0)
+        if load_ok.item() < 1.0:
+            synchronize()
+            return
+
+        self._broadcast_module(evalmodel)
+        try:
+            with adjust_status(evalmodel, training=False):
+                self.exp.eval(
+                    evalmodel, self.evaluator, self.is_distributed, return_outputs=False
+                )
+            if self.rank == 0:
+                self._log_deployment_summary()
+        except Exception as e:
+            if self.rank == 0:
+                logger.warning(f"Failed to run final analysis on best checkpoint: {e}")
+        synchronize()
+
+    def _log_deployment_summary(self):
+        tr = getattr(self.evaluator, "_last_threshold_result", None)
+        logger.info("=" * 60)
+        logger.info("TRAINING COMPLETE — DEPLOYMENT SUMMARY")
+        logger.info("=" * 60)
+        logger.info(
+            f"  Best AP:    {self.best_ap * 100:.2f}%  (mAP50:95)  at Epoch {self.best_epoch}"
+        )
+        if tr is not None:
+            prec = rec = None
+            try:
+                best_idx = tr["thresholds"].index(tr["best_threshold"])
+                prec = tr["precisions"][best_idx]
+                rec = tr["recalls"][best_idx]
+            except (KeyError, ValueError, IndexError, TypeError):
+                pass
+            if prec is not None and rec is not None:
+                logger.info(
+                    f"  Confidence: {tr['best_threshold']:.2f}  "
+                    f"(F1={tr['best_f1']:.3f}, Precision={prec:.3f}, Recall={rec:.3f})"
+                )
+            else:
+                logger.info(
+                    f"  Confidence: {tr['best_threshold']:.2f}  (F1={tr['best_f1']:.3f})"
+                )
+        logger.info(f"  NMS IoU:    {self.evaluator.nmsthre:.2f}  (used during training)")
+        logger.info("=" * 60)
+
     def before_epoch(self):
+        self._accum_micro_steps = 0
         logger.info("---> start train epoch{}".format(self.epoch + 1))
 
         if self.epoch + 1 == self.max_epoch - self.exp.no_aug_epochs or self.no_aug:
@@ -352,21 +532,25 @@ class Trainer:
             if not self.no_aug:
                 self.save_ckpt(ckpt_name="last_mosaic_epoch")
 
+    def _force_grad_sync(self):
+        """Manually average param grads across DDP ranks for trailing accumulation windows."""
+        average_gradients(self.model)
+
     def after_epoch(self):
         # Flush leftover accumulated gradients at the end of the epoch
-        if self.grad_accum_steps > 1 and (self.max_iter % self.grad_accum_steps != 0):
-            if self.clip_max_norm > 0:
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_max_norm)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self.optimizer.zero_grad()
-
-        self.save_ckpt(ckpt_name="latest")
+        if self.grad_accum_steps > 1 and self._accum_micro_steps > 0:
+            if self.is_distributed:
+                self._force_grad_sync()
+            self._optimizer_step(trailing_micro_steps=self._accum_micro_steps)
+            self._accum_micro_steps = 0
 
         if (self.epoch + 1) % self.exp.eval_interval == 0:
             all_reduce_norm(self.model)
+            if self.use_model_ema:
+                self._sync_ema_model()
             self.evaluate_and_save_model()
+
+        self.save_ckpt(ckpt_name="latest", ap=self._last_decision_ap)
 
     def before_iter(self):
         pass
@@ -432,8 +616,8 @@ class Trainer:
 
         # random resizing
         if not self.exp.deterministic:
-            resize_interval = getattr(self.exp, "random_resize_interval", 1)
-            if (self.progress_in_iter + 1) % resize_interval == 0:
+            resize_interval = getattr(self.exp, "random_resize_interval", 10)
+            if resize_interval > 0 and (self.progress_in_iter + 1) % resize_interval == 0:
                 self.input_size = self.exp.random_resize(
                     self.train_loader, self.epoch, self.rank, self.is_distributed
                 )
@@ -451,18 +635,33 @@ class Trainer:
                 ckpt_file = self.args.ckpt
 
             ckpt = torch.load(ckpt_file, map_location=self.device, weights_only=False)
-            # resume the model/optimizer state dict
-            model.load_state_dict(ckpt["model"])
+            student_state = ckpt.get("model_raw", ckpt["model"])
+            model.load_state_dict(student_state)
             self.optimizer.load_state_dict(ckpt["optimizer"])
+            if "scaler" in ckpt:
+                self.scaler.load_state_dict(ckpt["scaler"])
             self.best_ap = ckpt.pop("best_ap", 0)
             self.best_epoch = ckpt.pop("best_epoch", 0)
-            # resume the training states variables
+            self._early_stopping_counter = ckpt.pop("early_stopping_counter", 0)
+            progress = ckpt.get("progress", {})
             start_epoch = (
                 self.args.start_epoch - 1
                 if self.args.start_epoch is not None
                 else ckpt["start_epoch"]
             )
             self.start_epoch = start_epoch
+            self._resume_ema_state = ckpt.get("ema")
+            self._resume_ema_updates = ckpt.get("ema_updates")
+            progress_epoch = int(progress.get("epoch", start_epoch))
+            self._resume_iter = 0
+            if self.args.start_epoch is None and progress_epoch == start_epoch:
+                self._resume_iter = int(progress.get("iter", 0))
+            elif progress and self.args.start_epoch is None:
+                logger.warning(
+                    "Ignoring checkpoint progress.iter because progress.epoch "
+                    f"({progress_epoch}) does not match start_epoch ({start_epoch})."
+                )
+            self._restore_rng_state(ckpt.get("rng_state"))
             logger.info(
                 "loaded checkpoint '{}' (epoch {})".format(
                     self.args.resume, self.start_epoch
@@ -472,49 +671,82 @@ class Trainer:
             if self.args.ckpt is not None:
                 logger.info("loading checkpoint for fine tuning")
                 ckpt_file = self.args.ckpt
-                ckpt = torch.load(ckpt_file, map_location=self.device, weights_only=False)["model"]
-                model = load_ckpt(model, ckpt)
+                ckpt = torch.load(ckpt_file, map_location=self.device, weights_only=False)
+                if isinstance(ckpt, dict) and "model" in ckpt:
+                    model = load_ckpt(model, ckpt["model"])
+                else:
+                    model = load_ckpt(model, ckpt)
             self.start_epoch = 0
+            self._resume_ema_state = None
+            self._resume_ema_updates = None
+            self._resume_iter = 0
 
         return model
 
     def evaluate_and_save_model(self):
-        if self.use_model_ema:
-            evalmodel = self.ema_model.ema
-        else:
-            evalmodel = self.model
-            if is_parallel(evalmodel):
-                evalmodel = evalmodel.module
+        evalmodel = self._get_eval_model()
 
         with adjust_status(evalmodel, training=False):
-            (ap50_95, ap50, summary), predictions = self.exp.eval(
+            eval_outputs = self.exp.eval(
                 evalmodel, self.evaluator, self.is_distributed, return_outputs=True
             )
 
-        decision_score = ap50 if self.decision_metric == "ap50" else ap50_95
-        update_best_ckpt = decision_score > self.best_ap
-        if update_best_ckpt:
-            self.best_ap = decision_score
-            self.best_epoch = self.epoch + 1
+        ap50_95, ap50, summary, predictions = 0.0, 0.0, "", {}
+        decision_score = 0.0
+        update_best_ckpt = False
 
-        # Early stopping logic
-        if self.early_stopping_patience > 0:
+        if self.rank == 0:
+            (ap50_95, ap50, summary), predictions = eval_outputs
+            decision_score = ap50 if self.decision_metric == "ap50" else ap50_95
+            update_best_ckpt = decision_score > self.best_ap
             if update_best_ckpt:
-                self._early_stopping_counter = 0
-            else:
-                self._early_stopping_counter += 1
-                if self.rank == 0:
+                self.best_ap = decision_score
+                self.best_epoch = self.epoch + 1
+
+            if self.early_stopping_patience > 0:
+                if update_best_ckpt:
+                    self._early_stopping_counter = 0
+                else:
+                    self._early_stopping_counter += 1
                     logger.info(
                         f"Early stopping counter: {self._early_stopping_counter}"
                         f"/{self.early_stopping_patience}"
                     )
-                if self._early_stopping_counter >= self.early_stopping_patience:
-                    if self.rank == 0:
+                    if self._early_stopping_counter >= self.early_stopping_patience:
                         logger.info(
                             f"Early stopping triggered after {self._early_stopping_counter} "
                             f"epochs without improvement. Best metric: {self.best_ap:.4f}"
                         )
-                    self._stop_training = True
+                        self._stop_training = True
+
+        if self.is_distributed:
+            import torch.distributed as dist
+
+            state = torch.tensor(
+                [
+                    float(ap50_95),
+                    float(ap50),
+                    float(decision_score),
+                    float(update_best_ckpt),
+                    float(self._early_stopping_counter),
+                    float(self._stop_training),
+                    float(self.best_ap),
+                    float(self.best_epoch),
+                ],
+                device=self.device,
+            )
+            dist.broadcast(state, src=0)
+            if self.rank != 0:
+                ap50_95 = state[0].item()
+                ap50 = state[1].item()
+                decision_score = state[2].item()
+                update_best_ckpt = bool(state[3].item())
+                self._early_stopping_counter = int(state[4].item())
+                self._stop_training = bool(state[5].item())
+                self.best_ap = state[6].item()
+                self.best_epoch = int(state[7].item())
+
+        self._last_decision_ap = decision_score
 
         if self.rank == 0:
             if self.args.logger == "tensorboard":
@@ -535,14 +767,15 @@ class Trainer:
                     "train/epoch": self.epoch + 1,
                 }
                 self.mlflow_logger.on_log(self.args, self.exp, self.epoch+1, logs)
-            logger.info("\n" + summary)
+            if summary:
+                logger.info("\n" + summary)
         synchronize()
 
         self.save_ckpt("last_epoch", update_best_ckpt, ap=decision_score)
         if self.save_history_ckpt:
             self.save_ckpt(f"epoch_{self.epoch + 1}", ap=decision_score)
 
-        if self.args.logger == "mlflow":
+        if self.args.logger == "mlflow" and self.rank == 0:
             metadata = {
                     "epoch": self.epoch + 1,
                     "input_size": self.input_size,
@@ -553,20 +786,67 @@ class Trainer:
             self.mlflow_logger.save_checkpoints(self.args, self.exp, self.file_name, self.epoch,
                                                 metadata, update_best_ckpt)
 
+    def _capture_rng_state(self):
+        state = {
+            "rank": self.rank,
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+        }
+        if torch.cuda.is_available():
+            state["torch_cuda"] = torch.cuda.get_rng_state_all()
+        return state
+
+    def _restore_rng_state(self, rng_state):
+        if not rng_state:
+            return
+        if isinstance(rng_state, list):
+            if self.rank >= len(rng_state):
+                logger.warning(
+                    f"No RNG state for rank {self.rank}; checkpoint has {len(rng_state)} ranks."
+                )
+                return
+            rng_state = rng_state[self.rank]
+        if rng_state.get("rank", self.rank) != self.rank:
+            logger.warning(
+                f"Checkpoint RNG state was saved on rank {rng_state.get('rank')}; "
+                f"restoring on rank {self.rank} for best-effort resume."
+            )
+        if "python" in rng_state:
+            random.setstate(rng_state["python"])
+        if "numpy" in rng_state:
+            np.random.set_state(rng_state["numpy"])
+        if "torch" in rng_state:
+            torch.set_rng_state(rng_state["torch"])
+        if "torch_cuda" in rng_state and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(rng_state["torch_cuda"])
+
     def save_ckpt(self, ckpt_name, update_best_ckpt=False, ap=None):
+        rng_states = [self._capture_rng_state()]
+        if getattr(self, "is_distributed", False):
+            import torch.distributed as dist
+
+            rng_states = [None] * get_world_size()
+            dist.all_gather_object(rng_states, self._capture_rng_state())
+
         if self.rank == 0:
-            save_model = self.ema_model.ema if self.use_model_ema else self.model
+            student_model = self.model.module if is_parallel(self.model) else self.model
+            deployable_model = (
+                self.ema_model.ema if self.use_model_ema else student_model
+            )
             logger.info("Save weights to {}".format(self.file_name))
 
             base_dataset = self.exp.dataset
             if isinstance(base_dataset, (ConcatDataset, MixConcatDataset)):
                 base_dataset = base_dataset.datasets[0]
-            class_names = getattr(base_dataset, "class_ids", None) or getattr(base_dataset, "_classes", None)
+            class_ids = getattr(base_dataset, "class_ids", None)
+            class_names = getattr(base_dataset, "_classes", None) or class_ids
 
             meta = {
                 "model_name": self.exp.name,
                 "num_classes": self.exp.num_classes,
                 "class_names": list(class_names) if class_names is not None else None,
+                "class_ids": list(class_ids) if class_ids is not None else None,
                 "input_size": list(self.exp.input_size),
                 "depth": self.exp.depth,
                 "width": self.exp.width,
@@ -577,11 +857,23 @@ class Trainer:
 
             ckpt_state = {
                 "start_epoch": self.epoch + 1,
-                "model": save_model.state_dict(),
+                "model": deployable_model.state_dict(),
+                "model_raw": student_model.state_dict(),
+                "ema": self.ema_model.ema.state_dict() if self.use_model_ema else None,
+                "ema_updates": self.ema_model.updates if self.use_model_ema else 0,
                 "optimizer": self.optimizer.state_dict(),
+                "scaler": self.scaler.state_dict(),
                 "best_ap": self.best_ap,
                 "best_epoch": self.best_epoch,
+                "early_stopping_counter": self._early_stopping_counter,
                 "curr_ap": ap,
+                "rng_state": rng_states,
+                "progress": {
+                    # Checkpoints are written at epoch boundaries; resume at the
+                    # first micro-batch of the next epoch.
+                    "epoch": self.epoch + 1,
+                    "iter": 0,
+                },
                 "meta": meta,
             }
             save_checkpoint(

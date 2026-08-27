@@ -2,6 +2,8 @@ import torch
 from torch import nn
 from torch.hub import load_state_dict_from_url
 
+from yolox.utils import get_deployable_state_dict
+
 __all__ = [
     "create_yolox_model",
     "yolox_nano",
@@ -60,7 +62,7 @@ def create_yolox_model(name: str, pretrained: bool = True, num_classes: int = 80
             weights_url = _CKPT_FULL_PATH[name]
             ckpt = load_state_dict_from_url(weights_url, map_location="cpu")
             if "model" in ckpt:
-                ckpt = ckpt["model"]
+                ckpt = get_deployable_state_dict(ckpt)
             yolox_model.load_state_dict(ckpt)
     else:
         assert exp_path is not None, "for a \"yolox_custom\" model exp_path must be provided"
@@ -69,7 +71,7 @@ def create_yolox_model(name: str, pretrained: bool = True, num_classes: int = 80
         if ckpt_path:
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             if "model" in ckpt:
-                ckpt = ckpt["model"]
+                ckpt = get_deployable_state_dict(ckpt)
             yolox_model.load_state_dict(ckpt)
 
     yolox_model.to(device)

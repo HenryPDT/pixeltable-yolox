@@ -9,6 +9,33 @@ from torch.utils.data.sampler import BatchSampler as torchBatchSampler
 from torch.utils.data.sampler import Sampler
 
 
+class DistributedEvalSampler(Sampler):
+    """Shard validation data so every sample is evaluated exactly once."""
+
+    def __init__(self, dataset, num_replicas=None, rank=None):
+        if num_replicas is None:
+            if dist.is_available() and dist.is_initialized():
+                num_replicas = dist.get_world_size()
+            else:
+                num_replicas = 1
+        if rank is None:
+            if dist.is_available() and dist.is_initialized():
+                rank = dist.get_rank()
+            else:
+                rank = 0
+
+        self.dataset = dataset
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.num_samples = len(range(rank, len(dataset), num_replicas))
+
+    def __iter__(self):
+        return iter(range(self.rank, len(self.dataset), self.num_replicas))
+
+    def __len__(self):
+        return self.num_samples
+
+
 class YoloBatchSampler(torchBatchSampler):
     """
     This batch sampler will generate mini-batches of (mosaic, index) tuples from another sampler.

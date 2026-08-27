@@ -7,6 +7,7 @@ from loguru import logger
 import torch
 
 from yolox.exp import get_exp
+from yolox.utils import get_deployable_state_dict
 
 
 def make_parser():
@@ -62,7 +63,7 @@ def main():
 
     model.eval()
     if "model" in ckpt:
-        ckpt = ckpt["model"]
+        ckpt = get_deployable_state_dict(ckpt)
     model.load_state_dict(ckpt)
     model.head.decode_in_inference = args.decode_in_inference
 

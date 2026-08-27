@@ -116,7 +116,7 @@ Examples:
     )
     training_group.add_argument(
         "--lr", "--learning-rate", type=float, default=None,
-        help="Learning rate per image (default: 0.01/64)"
+        help="Learning rate: base_lr for adamw/adan, per-image LR for sgd"
     )
     training_group.add_argument(
         "--weight-decay", type=float, default=None,
@@ -132,7 +132,7 @@ Examples:
     )
     training_group.add_argument(
         "--eval-interval", type=int, default=None,
-        help="Evaluation interval in epochs (default: 10)"
+        help="Evaluation interval in epochs (default: 1)"
     )
     training_group.add_argument(
         "--save-history", action="store_true",
@@ -140,7 +140,7 @@ Examples:
     )
     training_group.add_argument(
         "--output-dir", type=str, default=None,
-        help="Experiment name for output directory. Results will be saved to out/{name}. Auto-increments if directory exists (e.g., out/my_exp_2)"
+        help="Experiment name under out/train/. Auto-increments if directory exists."
     )
     training_group.add_argument(
         "--min-lr-ratio", "--min-lr", type=float, default=None,
@@ -152,7 +152,7 @@ Examples:
     )
     training_group.add_argument(
         "--clip-grad", type=float, default=None,
-        help="Gradient clipping max norm (default: 0.1)"
+        help="Gradient clipping max norm (default: 0.0, disabled)"
     )
     training_group.add_argument(
         "--patience", type=int, default=None,
@@ -172,7 +172,7 @@ Examples:
     )
     training_group.add_argument(
         "--amp-dtype", type=str, choices=["float16", "bfloat16"], default=None,
-        help="Mixed precision precision type: 'float16' or 'bfloat16' (default: float16)"
+        help="Mixed precision dtype. Enables AMP when set (float16 also accepts --fp16)."
     )
     training_group.add_argument(
         "--decision-metric", type=str, choices=["ap50_95", "ap50"], default=None,
@@ -260,7 +260,7 @@ Examples:
     )
     data_group.add_argument(
         '--resize-interval', '--random-resize-interval', type=int, default=None,
-        help="Interval in iterations for multi-scale random resizing, e.g. 1 for every batch (default: 1)"
+        help="Interval in iterations for multi-scale random resizing (default: 10)"
     )
 
     # Model parameters
@@ -285,22 +285,52 @@ Examples:
     return parser
 
 
+def apply_lr_override(config: YoloxConfig, args, d_config_opts=None):
+    """Apply --lr after config/CLI/-D options are merged, unless -D already set LR."""
+    if args.lr is None:
+        return
+    d_config_opts = d_config_opts or {}
+    if "base_lr" in d_config_opts or "basic_lr_per_img" in d_config_opts:
+        return
+    if config.opt_type in ("adamw", "adan"):
+        config.base_lr = args.lr
+    else:
+        config.base_lr = None
+        config.basic_lr_per_img = args.lr
+
+
+def merge_train_cli_config(config: YoloxConfig, args) -> YoloxConfig:
+    """Mirror ``main()`` config merge order for tests and CLI entrypoints."""
+    arg_config_opts = convert_args_to_config_opts(args)
+    d_config_opts = parse_model_config_opts(args.D)
+
+    config.update(arg_config_opts)
+    config.update(d_config_opts)
+    apply_lr_override(config, args, d_config_opts)
+    if config.opt_type == "sgd" and "base_lr" not in d_config_opts:
+        config.base_lr = None
+    config.validate()
+    return config
+
+
 def train(config: YoloxConfig, args):
     if config.seed is not None:
         assert isinstance(config.seed, int)
         random.seed(config.seed)
         torch.manual_seed(config.seed)
         cudnn.deterministic = True
+        cudnn.benchmark = False
         warnings.warn(
             "You have chosen to seed training. This will turn on the CUDNN deterministic setting, "
             "which can slow down your training considerably! You may see unexpected behavior "
             "when restarting from checkpoints."
         )
+    else:
+        cudnn.benchmark = True
 
     # set environment variables for distributed training
     configure_nccl()
     configure_omp()
-    cudnn.benchmark = True
 
     trainer = config.get_trainer(args)
     trainer.train()
@@ -314,10 +344,8 @@ def convert_args_to_config_opts(args):
     if args.epochs is not None:
         config_opts['max_epoch'] = str(args.epochs)
     if args.lr is not None:
-        if getattr(args, "optimizer", None) in ["adamw", "adan"]:
-            config_opts['base_lr'] = str(args.lr)
-        else:
-            config_opts['basic_lr_per_img'] = str(args.lr)
+        # Applied after full config merge in main() using config.opt_type.
+        pass
     if args.weight_decay is not None:
         config_opts['weight_decay'] = str(args.weight_decay)
     if args.warmup_epochs is not None:
@@ -434,18 +462,7 @@ def main(argv: list[str]) -> None:
     if args.config is None:
         raise AttributeError("Please specify a model configuration.")
     config = resolve_config(args.config)
-    
-    # Convert command-line arguments to config options
-    arg_config_opts = convert_args_to_config_opts(args)
-    
-    # Parse -D options
-    d_config_opts = parse_model_config_opts(args.D)
-    
-    # Merge config options (command-line args take precedence over defaults, -D options take precedence over command-line args)
-    config_opts = {**arg_config_opts, **d_config_opts}
-    
-    config.update(config_opts)
-    config.validate()
+    merge_train_cli_config(config, args)
 
     if not args.name:
         args.name = config.name

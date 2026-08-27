@@ -36,10 +36,10 @@ remains accessible for academic and commercial use.
 This fork contains the following changes and modernizations:
 
 - `pip install`able with all modern versions of Python (3.9+) via `uv` or `pip`
-- **Auto Batch Size Discovery (`-b -1`)**: Automatically probes GPU VRAM using real forward/backward passes at maximum multi-scale headroom
+- **Auto Batch Size Discovery (`-b -1`)**: Probes GPU VRAM with an isolated model on the production mosaic training path and broadcasts the selected global batch size in DDP
 - **Decoupled Backbone Learning Rate (`--backbone-lr-ratio`)**: Scales backbone LR (e.g. 0.2x) to preserve generic pretrained features during transfer learning
-- **Modern Optimizer Suite (`--optimizer`)**: Added `AdamW` and `Adan` (Adaptive Nesterov Momentum) for rapid convergence in 30–50 epochs alongside standard `SGD`
-- **Mixed Precision (`--amp-dtype`)**: Native `bfloat16` and `float16` support with automatic hardware detection and zero loss-scaler overhead on Ampere/Ada/Hopper
+- **Modern Optimizer Suite (`--optimizer`)**: Added `AdamW` and `Adan` (Adaptive Nesterov Momentum) as alternatives to standard `SGD`
+- **Mixed Precision (`--amp-dtype`)**: Native `bfloat16` and `float16` support with automatic hardware detection; AMP is enabled only when `--amp-dtype` or legacy `--fp16` is set
 - **Confidence Threshold Analysis**: Evaluates optimal F1 confidence thresholds and automatically generates `f1_vs_threshold.png` and `pr_vs_threshold.png`
 - **Self-Describing Checkpoints (`meta`)**: Checkpoints carry class names, counts, and model metadata for zero-config ONNX exports and inference
 - **Early Stopping (`--patience`)**: Automatically halts training and preserves best weights when validation mAP stops improving
@@ -207,7 +207,7 @@ For instructions on training with a custom dataset format, see [Train on Custom 
 **2. Start Training**
 
 #### Fast Fine-Tuning with Modern Features (Recommended)
-When fine-tuning from pretrained COCO weights, use **AdamW** (or **Adan**) with a **decoupled backbone learning rate** and **auto batch sizing** to achieve convergence in 40–50 epochs:
+When fine-tuning from pretrained COCO weights, AdamW or Adan with a decoupled backbone learning rate and auto batch sizing can reduce training time versus the legacy 300-epoch SGD recipe:
 
 ```bash
 yolox train \
@@ -227,7 +227,7 @@ yolox train \
 ```
 
 #### Training from Scratch with Modern Features (Recommended)
-When training from scratch (without pretrained weights), using **AdamW** with auto batch sizing and `bfloat16` reaches full convergence in **80–120 epochs** (compared to 300 epochs of SGD):
+When training from scratch (without pretrained weights), AdamW with auto batch sizing and `bfloat16` is a practical alternative to the legacy 300-epoch SGD recipe:
 
 ```bash
 yolox train \
@@ -263,17 +263,24 @@ yolox train \
 #### Key Training Parameters
 | Flag | Description | Default |
 | :--- | :--- | :--- |
-| `-b, --batch-size` | Batch size per GPU (`-1` automatically probes optimal batch size for VRAM) | `64` |
-| `--optimizer` | Optimizer type: `sgd`, `adamw`, or `adan` | `sgd` |
+| `-b, --batch-size` | Global batch size across all GPUs (`-1` probes optimal per-device batch and multiplies by world size) | `64` |
+| `--optimizer` | Optimizer type: `sgd`, `adamw`, or `adan` (AdamW/Adan defaults are YOLOX-specific, not copied from D-FINE) | `sgd` |
 | `--backbone-lr-ratio`| Learning rate multiplier for backbone feature extractor | `1.0` |
-| `--lr` | Base learning rate | `0.01/64` per img |
-| `--amp-dtype` | Mixed precision format: `float16` or `bfloat16` | `float16` |
+| `--lr` | Base LR for `adamw`/`adan`; per-image LR for `sgd`. `-D base_lr=...` or `-D basic_lr_per_img=...` overrides `--lr`. | `0.01/64` per img |
+| `--amp-dtype` | Mixed precision format: `float16` or `bfloat16`. Set this flag (or use legacy `--fp16`) to enable AMP. | disabled |
+| `--grad-accum` | Gradient accumulation steps (effective batch = batch_size × grad_accum) | `1` |
 | `--patience` | Early stopping patience in epochs (`0` disables) | `0` |
 | `--decision-metric` | Metric used to pick best checkpoint: `ap50_95` or `ap50` | `ap50_95` |
 | `--no-aug-epochs` | Epochs at the end to disable mosaic augmentation | `15` |
 | `--cache` | Cache images to `ram` or `disk` for maximum throughput | `None` |
 
-Checkpoints and logs will be saved to `out/train/{name}/`. Alongside model checkpoints, the evaluation engine will automatically save `f1_vs_threshold.png` and `pr_vs_threshold.png`.
+**Checkpoint semantics:** `model` stores deployable weights (EMA weights when EMA is enabled). `model_raw` stores the live training student used to resume optimization. `latest_ckpt.pth` is written after each epoch's evaluation decisions.
+
+**Scheduler behavior:** the LR scheduler advances once per physical training iteration (before each optimizer step boundary), including during gradient accumulation windows.
+
+**Augmentation notes:** per-image augmentations run through Albumentations after mosaic/mixup. Empty-target images still receive image-only Albumentations transforms.
+
+Checkpoints and logs are saved to `out/train/{name}/`. When validation runs, the evaluation engine may also save `f1_vs_threshold.png` and `pr_vs_threshold.png`.
 
 For a full list of training options:
 ```bash

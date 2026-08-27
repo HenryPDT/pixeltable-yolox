@@ -1,19 +1,47 @@
-import logging
-import pytest
 import subprocess
+import sys
 
-logger = logging.getLogger(__name__)
+import pytest
+import torch
+
+from yolox.config import YoloxS
 
 
-def test_export_onnx():
-    rs = subprocess.run(["python", "yolox/cli/export_onnx.py", "--name", "yolox_s", "--onnx-name", "yolox_s.onnx", "--onnxsim"])
-    if rs.returncode != 0:
-        pytest.fail("yolox/cli/export_onnx.py failed. See the log for details!")
+@pytest.fixture
+def ema_checkpoint(tmp_path):
+    config = YoloxS()
+    model = config.get_model()
+    ema_model = config.get_model()
+    with torch.no_grad():
+        for param, ema_param in zip(model.parameters(), ema_model.parameters()):
+            if param.dtype.is_floating_point:
+                param.fill_(1.0)
+                ema_param.fill_(2.0)
+
+    ckpt_path = tmp_path / "ema_ckpt.pth"
+    torch.save(
+        {
+            "model": ema_model.state_dict(),
+            "model_raw": model.state_dict(),
+        },
+        ckpt_path,
+    )
+    return ckpt_path
+
+
+def test_export_onnx_with_checkpoint_fixture(ema_checkpoint):
+    onnx_path = ema_checkpoint.with_suffix(".onnx")
     rs = subprocess.run(
-        ["python", "yolox/cli/export_onnx.py", "--name", "yolox_s", "--onnx-name", "yolox_s.onnx"])
-    if rs.returncode != 0:
-        pytest.fail("yolox/cli/export_onnx.py failed. See the log for details!")
-    rs = subprocess.run(
-        ["python", "yolox/cli/export_onnx.py", "--name", "yolox_custom", "--config", "/path/to/yolox_s_custom.cfg", "--onnx-name", "yolox_sc.onnx"])
-    if rs.returncode != 0:
-        pytest.fail("yolox/cli/export_onnx.py failed. See the log for details!")
+        [
+            sys.executable,
+            "yolox/cli/export_onnx.py",
+            "-w",
+            str(ema_checkpoint),
+            "-cfg",
+            "yolox_s",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert rs.returncode == 0, rs.stderr
+    assert onnx_path.exists()

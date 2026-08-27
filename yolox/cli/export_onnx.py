@@ -7,7 +7,7 @@ import torch.nn as nn
 from yolox.models import YoloxModule
 from yolox.config import YoloxConfig
 from yolox.cli.utils import resolve_config
-from yolox.utils import replace_module
+from yolox.utils import get_deployable_state_dict, replace_module
 from yolox.models.network_blocks import SiLU
 
 
@@ -39,7 +39,7 @@ def yolox_export(weights: str, config_str: str) -> (nn.Module, YoloxConfig):
 
     # Extract num_classes from the checkpoint by looking at the classification head
     # The cls_preds layers have shape [num_classes, ...], so we can get num_classes from there
-    model_state = checkpoint.get('model', checkpoint)
+    model_state = get_deployable_state_dict(checkpoint)
 
     # Look for the first classification prediction layer to get num_classes
     cls_pred_key = None

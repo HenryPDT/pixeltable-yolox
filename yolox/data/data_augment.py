@@ -205,7 +205,7 @@ class AlbumentationsTransform:
         if blur_prob > 0:
             augs.append(A.Blur(p=blur_prob))
         if noise_prob > 0:
-            augs.append(A.GaussNoise(p=noise_prob))
+            augs.append(A.GaussNoise(std_range=(0.02, 0.05), p=noise_prob))
         if gamma_prob > 0:
             augs.append(A.RandomGamma(p=gamma_prob))
         if brightness_prob > 0:
@@ -263,7 +263,10 @@ class AlbumentationsTransform:
             labels: filtered labels (N',)
         """
         if len(boxes_xyxy) == 0:
-            return image, boxes_xyxy, labels
+            transformed = self.transform(image=image, bboxes=[], class_labels=[])
+            return transformed["image"], np.zeros((0, 4), dtype=np.float32), np.zeros(
+                (0,), dtype=np.float32
+            )
 
         boxes_xyxy = np.asarray(boxes_xyxy, dtype=np.float32)
         labels = np.asarray(labels)
@@ -329,6 +332,10 @@ class TrainTransform:
         boxes = targets[:, :4].copy()
         labels = targets[:, 4].copy()
         if len(boxes) == 0:
+            if self.albu_transform is not None:
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                image, boxes, labels = self.albu_transform(image, boxes, labels)
+                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
             targets = np.zeros((self.max_labels, 5), dtype=np.float32)
             image, r_o = preproc(image, input_dim)
             return image, targets

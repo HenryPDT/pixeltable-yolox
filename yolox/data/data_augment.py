@@ -156,11 +156,174 @@ def preproc(img, input_size, swap=(2, 0, 1)):
     return padded_img, r
 
 
+class AlbumentationsTransform:
+    """Augmentation pipeline using albumentations.
+
+    Handles all per-image augmentations including HSV color shifts, horizontal flip,
+    and additional augmentations (blur, noise, gamma, brightness, grayscale, coarse
+    dropout, vertical flip, rotation). Bounding boxes are handled automatically via
+    albumentations' BboxParams in xyxy (pascal_voc) format.
+
+    This replaces the manual augment_hsv() and _mirror() functions with a unified
+    albumentations pipeline for cleaner, less error-prone bbox handling.
+    """
+
+    def __init__(
+        self,
+        hsv_prob=1.0,
+        hsv_hgain=5,
+        hsv_sgain=30,
+        hsv_vgain=30,
+        hflip_prob=0.5,
+        blur_prob=0.01,
+        noise_prob=0.01,
+        gamma_prob=0.02,
+        brightness_prob=0.02,
+        to_gray_prob=0.01,
+        coarse_dropout_prob=0.0,
+        vflip_prob=0.0,
+        rotate90_prob=0.0,
+        rotation_degree=0.0,
+        rotation_prob=0.0,
+    ):
+        import albumentations as A
+
+        augs = []
+
+        # Core augmentations (replacing manual augment_hsv + _mirror)
+        if hsv_prob > 0:
+            augs.append(A.HueSaturationValue(
+                hue_shift_limit=hsv_hgain,
+                sat_shift_limit=hsv_sgain,
+                val_shift_limit=hsv_vgain,
+                p=hsv_prob,
+            ))
+        if hflip_prob > 0:
+            augs.append(A.HorizontalFlip(p=hflip_prob))
+
+        # Additional pixel-level augmentations
+        if blur_prob > 0:
+            augs.append(A.Blur(p=blur_prob))
+        if noise_prob > 0:
+            augs.append(A.GaussNoise(p=noise_prob))
+        if gamma_prob > 0:
+            augs.append(A.RandomGamma(p=gamma_prob))
+        if brightness_prob > 0:
+            augs.append(A.RandomBrightnessContrast(p=brightness_prob))
+        if to_gray_prob > 0:
+            augs.append(A.ToGray(p=to_gray_prob))
+        if coarse_dropout_prob > 0:
+            augs.append(A.CoarseDropout(
+                num_holes_range=(1, 2),
+                hole_height_range=(0.05, 0.15),
+                hole_width_range=(0.05, 0.15),
+                p=coarse_dropout_prob,
+            ))
+
+        # Additional spatial augmentations
+        if vflip_prob > 0:
+            augs.append(A.VerticalFlip(p=vflip_prob))
+        if rotate90_prob > 0:
+            import cv2 as _cv2
+            augs.append(A.Affine(
+                rotate=[90, 90],
+                p=rotate90_prob,
+                fit_output=True,
+            ))
+        if rotation_prob > 0 and rotation_degree > 0:
+            import cv2 as _cv2
+            augs.append(A.Rotate(
+                limit=rotation_degree,
+                p=rotation_prob,
+                interpolation=_cv2.INTER_LINEAR,
+                border_mode=_cv2.BORDER_CONSTANT,
+                fill=(114, 114, 114),
+            ))
+
+        self.transform = A.Compose(
+            augs,
+            bbox_params=A.BboxParams(
+                format="pascal_voc",
+                label_fields=["class_labels"],
+                min_visibility=0.1,
+            ),
+        )
+
+    def __call__(self, image, boxes_xyxy, labels):
+        """Apply augmentations to image and bounding boxes.
+
+        Args:
+            image: np.ndarray BGR image (H, W, 3)
+            boxes_xyxy: np.ndarray (N, 4) in absolute xyxy format
+            labels: np.ndarray (N,) class labels
+
+        Returns:
+            image: augmented image
+            boxes_xyxy: augmented boxes (N', 4)
+            labels: filtered labels (N',)
+        """
+        if len(boxes_xyxy) == 0:
+            return image, boxes_xyxy, labels
+
+        boxes_xyxy = np.asarray(boxes_xyxy, dtype=np.float32)
+        labels = np.asarray(labels)
+        x1, y1, x2, y2 = (
+            boxes_xyxy[:, 0],
+            boxes_xyxy[:, 1],
+            boxes_xyxy[:, 2],
+            boxes_xyxy[:, 3],
+        )
+        # Mosaic / clip can leave zero-area edge boxes; Albumentations raises ValueError
+        # on x_max <= x_min (strict check in check_bboxes).
+        valid = (x2 > x1 + 1e-4) & (y2 > y1 + 1e-4)
+        if not np.any(valid):
+            transformed = self.transform(image=image, bboxes=[], class_labels=[])
+            return transformed["image"], np.zeros((0, 4), dtype=np.float32), np.zeros(
+                (0,), dtype=np.float32
+            )
+        boxes_xyxy = boxes_xyxy[valid]
+        labels = labels[valid]
+
+        # Albumentations validates normalized coords in [0, 1]; float / aug drift can
+        # leave x_max slightly past the image edge (e.g. 1.0015), which raises ValueError.
+        h, w = image.shape[0], image.shape[1]
+        boxes_xyxy[:, [0, 2]] = np.clip(boxes_xyxy[:, [0, 2]], 0.0, float(w))
+        boxes_xyxy[:, [1, 3]] = np.clip(boxes_xyxy[:, [1, 3]], 0.0, float(h))
+        x1, y1, x2, y2 = (
+            boxes_xyxy[:, 0],
+            boxes_xyxy[:, 1],
+            boxes_xyxy[:, 2],
+            boxes_xyxy[:, 3],
+        )
+        valid = (x2 > x1 + 1e-4) & (y2 > y1 + 1e-4)
+        if not np.any(valid):
+            transformed = self.transform(image=image, bboxes=[], class_labels=[])
+            return transformed["image"], np.zeros((0, 4), dtype=np.float32), np.zeros(
+                (0,), dtype=np.float32
+            )
+        boxes_xyxy = boxes_xyxy[valid]
+        labels = labels[valid]
+
+        transformed = self.transform(
+            image=image,
+            bboxes=boxes_xyxy,
+            class_labels=labels,
+        )
+        image = transformed["image"]
+        boxes_out = np.array(transformed["bboxes"], dtype=np.float32)
+        labels_out = np.array(transformed["class_labels"], dtype=np.float32)
+
+        if len(boxes_out) == 0:
+            boxes_out = np.zeros((0, 4), dtype=np.float32)
+            labels_out = np.zeros((0,), dtype=np.float32)
+
+        return image, boxes_out, labels_out
+
+
 class TrainTransform:
-    def __init__(self, max_labels=50, flip_prob=0.5, hsv_prob=1.0):
+    def __init__(self, max_labels=50, albu_transform=None):
         self.max_labels = max_labels
-        self.flip_prob = flip_prob
-        self.hsv_prob = hsv_prob
+        self.albu_transform = albu_transform
 
     def __call__(self, image, targets, input_dim):
         boxes = targets[:, :4].copy()
@@ -172,17 +335,19 @@ class TrainTransform:
 
         image_o = image.copy()
         targets_o = targets.copy()
-        height_o, width_o, _ = image_o.shape
         boxes_o = targets_o[:, :4]
         labels_o = targets_o[:, 4]
         # bbox_o: [xyxy] to [c_x,c_y,w,h]
         boxes_o = xyxy2cxcywh(boxes_o)
 
-        if random.random() < self.hsv_prob:
-            augment_hsv(image)
-        image_t, boxes = _mirror(image, boxes, self.flip_prob)
-        height, width, _ = image_t.shape
-        image_t, r_ = preproc(image_t, input_dim)
+        # Apply all augmentations via albumentations (HSV, flip, blur, noise, etc.)
+        # Albumentations expects RGB but YOLOX provides BGR from cv2
+        if self.albu_transform is not None:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            image, boxes, labels = self.albu_transform(image, boxes, labels)
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+        image_t, r_ = preproc(image, input_dim)
         # boxes [xyxy] 2 [cx,cy,w,h]
         boxes = xyxy2cxcywh(boxes)
         boxes *= r_

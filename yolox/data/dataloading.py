@@ -104,7 +104,29 @@ def list_collate(batch):
     return items
 
 
+def _worker_opencv_thread_hardening():
+    """Limit threaded libs in forked DataLoader workers (avoids hangs with cv2 + albumentations)."""
+    try:
+        import cv2
+
+        cv2.setNumThreads(0)
+    except Exception:
+        pass
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+
+def worker_init_opencv_only(worker_id):
+    """Use with deterministic=True: harden threads without changing the prior no-op RNG reset."""
+    _ = worker_id
+    _worker_opencv_thread_hardening()
+
+
 def worker_init_reset_seed(worker_id):
+    _ = worker_id
+    _worker_opencv_thread_hardening()
     seed = uuid.uuid4().int % 2**32
     random.seed(seed)
     torch.set_rng_state(torch.manual_seed(seed).get_state())

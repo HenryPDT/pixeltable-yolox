@@ -281,7 +281,7 @@ class Predictor:
             from torch2trt import TRTModule
 
             model_trt = TRTModule()
-            model_trt.load_state_dict(torch.load(trt_file))
+            model_trt.load_state_dict(torch.load(trt_file, weights_only=False))
 
             x = torch.ones(1, 3, config.test_size[0], config.test_size[1]).cuda()
             self.model(x)

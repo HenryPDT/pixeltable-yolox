@@ -12,6 +12,8 @@ def find_best_confidence_threshold(
     class_names,
     thresholds=None,
     save_dir=None,
+    coco_gt=None,
+    coco_dt=None,
 ):
     """Sweep confidence thresholds to find the best one by F1 score.
 
@@ -19,10 +21,12 @@ def find_best_confidence_threshold(
     by examining which detections survive after re-filtering by score.
 
     Args:
-        coco_eval: pycocotools COCOeval object (after evaluate() + accumulate())
+        coco_eval: pycocotools COCOeval or CocoEvalOpt object
         class_names: list of class name strings
         thresholds: list of float thresholds to sweep (default: 0.1 to 0.95 step 0.05)
         save_dir: optional directory to save threshold analysis plots
+        coco_gt: optional COCO ground truth object (for fallback when evalImgs is None)
+        coco_dt: optional COCO detections object (for fallback when evalImgs is None)
 
     Returns:
         dict with keys:
@@ -37,10 +41,44 @@ def find_best_confidence_threshold(
         thresholds = [round(t * 0.05, 2) for t in range(2, 20)]  # 0.10 to 0.95
 
     # Get evaluation data from COCO
-    eval_imgs = coco_eval.evalImgs
+    eval_imgs = getattr(coco_eval, "evalImgs", None)
+
+    # If FastCocoEvalOp was used, self.evalImgs is None in Python to save memory.
+    # Fallback: re-evaluate with standard Python COCOeval on current image & category IDs.
+    if eval_imgs is None or len(eval_imgs) == 0:
+        coco_gt = coco_gt or getattr(coco_eval, "cocoGt", None)
+        coco_dt = coco_dt or getattr(coco_eval, "cocoDt", None)
+        if coco_gt is not None and coco_dt is not None:
+            try:
+                from pycocotools.cocoeval import COCOeval as StandardCOCOeval
+
+                std_eval = StandardCOCOeval(coco_gt, coco_dt, "bbox")
+                std_eval.params.imgIds = list(coco_eval.params.imgIds)
+                std_eval.params.catIds = list(coco_eval.params.catIds)
+                std_eval.params.iouThrs = list(coco_eval.params.iouThrs)
+                std_eval.params.maxDets = list(coco_eval.params.maxDets)
+                std_eval.evaluate()
+                eval_imgs = std_eval.evalImgs
+            except Exception as e:
+                logger.warning(f"Fallback COCO evaluation for threshold analysis failed: {e}")
+
     if eval_imgs is None or len(eval_imgs) == 0:
         logger.warning("No evaluation data available for confidence threshold analysis")
         return None
+
+    # Filter eval_imgs to only area_idx == 0 ('all' area range) to prevent double counting
+    params = getattr(coco_eval, "params", None)
+    if params is not None:
+        num_cats = len(getattr(params, "catIds", []))
+        num_area = len(getattr(params, "areaRng", []))
+        num_imgs = len(getattr(params, "imgIds", []))
+        if num_cats > 0 and num_area > 0 and num_imgs > 0 and len(eval_imgs) == num_cats * num_area * num_imgs:
+            filtered_eval_imgs = []
+            for cat_i in range(num_cats):
+                for img_i in range(num_imgs):
+                    idx = cat_i * num_area * num_imgs + 0 * num_imgs + img_i
+                    filtered_eval_imgs.append(eval_imgs[idx])
+            eval_imgs = filtered_eval_imgs
 
     # Collect all detection scores and match info
     all_gt_count = 0

@@ -350,6 +350,8 @@ class CocoEvaluator:
                     cocoEval,
                     class_names=cat_names,
                     save_dir=self.save_dir,
+                    coco_gt=cocoGt,
+                    coco_dt=cocoDt,
                 )
                 if threshold_result is not None:
                     info += (

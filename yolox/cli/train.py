@@ -162,6 +162,22 @@ Examples:
         "--seed", type=int, default=None,
         help="Deterministic training seed (default: None)"
     )
+    training_group.add_argument(
+        "--optimizer", type=str, choices=["sgd", "adamw", "adan"], default=None,
+        help="Optimizer type: 'sgd', 'adamw', or 'adan' (default: sgd)"
+    )
+    training_group.add_argument(
+        "--backbone-lr-ratio", type=float, default=None,
+        help="Backbone learning rate multiplier for fine-tuning, e.g. 0.2 (default: 1.0)"
+    )
+    training_group.add_argument(
+        "--amp-dtype", type=str, choices=["float16", "bfloat16"], default=None,
+        help="Mixed precision precision type: 'float16' or 'bfloat16' (default: float16)"
+    )
+    training_group.add_argument(
+        "--decision-metric", type=str, choices=["ap50_95", "ap50"], default=None,
+        help="Metric used to select best checkpoint: 'ap50_95' or 'ap50' (default: ap50_95)"
+    )
 
     # Data parameters
     data_group = parser.add_argument_group('Data Parameters', 'Dataset and augmentation parameters')
@@ -242,6 +258,10 @@ Examples:
         '--multiscale-range', type=int, default=None,
         help="Simple multi-scale range factor (e.g., 5). Used if random-size is not set."
     )
+    data_group.add_argument(
+        '--resize-interval', '--random-resize-interval', type=int, default=None,
+        help="Interval in iterations for multi-scale random resizing, e.g. 1 for every batch (default: 1)"
+    )
 
     # Model parameters
     model_group = parser.add_argument_group('Model Parameters', 'Model architecture parameters')
@@ -294,7 +314,10 @@ def convert_args_to_config_opts(args):
     if args.epochs is not None:
         config_opts['max_epoch'] = str(args.epochs)
     if args.lr is not None:
-        config_opts['basic_lr_per_img'] = str(args.lr)
+        if getattr(args, "optimizer", None) in ["adamw", "adan"]:
+            config_opts['base_lr'] = str(args.lr)
+        else:
+            config_opts['basic_lr_per_img'] = str(args.lr)
     if args.weight_decay is not None:
         config_opts['weight_decay'] = str(args.weight_decay)
     if args.warmup_epochs is not None:
@@ -369,6 +392,14 @@ def convert_args_to_config_opts(args):
         config_opts['early_stopping_patience'] = str(args.patience)
     if args.seed is not None:
         config_opts['seed'] = str(args.seed)
+    if args.optimizer is not None:
+        config_opts['opt_type'] = str(args.optimizer)
+    if args.backbone_lr_ratio is not None:
+        config_opts['backbone_lr_ratio'] = str(args.backbone_lr_ratio)
+    if args.amp_dtype is not None:
+        config_opts['amp_dtype'] = str(args.amp_dtype)
+    if args.decision_metric is not None:
+        config_opts['decision_metric'] = str(args.decision_metric)
     
     # Handle multi-scale training arguments - process both independently
     if args.random_size is not None:
@@ -385,6 +416,8 @@ def convert_args_to_config_opts(args):
     
     if args.multiscale_range is not None:
         config_opts['multiscale_range'] = str(args.multiscale_range)
+    if args.resize_interval is not None:
+        config_opts['random_resize_interval'] = str(args.resize_interval)
     
     # Model parameters
     if args.depth is not None:

@@ -121,6 +121,18 @@ class YoloxConfig:
     weight_decay: float = 5e-4
     # momentum of optimizer
     momentum: float = 0.9
+    # optimizer type: "sgd" | "adamw" | "adan"
+    opt_type: Literal["sgd", "adamw", "adan"] = "sgd"
+    # decoupled backbone learning rate ratio (e.g. 0.2 means backbone is 0.2 * base_lr)
+    backbone_lr_ratio: float = 1.0
+    # base learning rate override (if None, computes from basic_lr_per_img * batch_size)
+    base_lr: Optional[float] = None
+    # mixed precision data type: "float16" | "bfloat16"
+    amp_dtype: Literal["float16", "bfloat16"] = "float16"
+    # metric used for selecting the best checkpoint: "ap50_95" | "ap50"
+    decision_metric: Literal["ap50_95", "ap50"] = "ap50_95"
+    # interval in iterations for multi-scale random resizing (1 = every batch for maximum scale invariance)
+    random_resize_interval: int = 1
     # log period in iter, for example,
     # if set to 1, user could see log every iteration.
     print_interval: int = 10
@@ -177,9 +189,12 @@ class YoloxConfig:
                     except Exception:
                         v = ast.literal_eval(v)
 
-                if k == 'seed':
+                if k == 'seed' and v is not None:
                     # Special handling for seed, which has a default of None
                     v = int(v)
+                elif k == 'base_lr' and v is not None:
+                    # Special handling for base_lr, which has a default of None
+                    v = float(v)
                 setattr(self, k, v)
             else:
                 raise AttributeError(f'Unknown model configuration option: {k}')
@@ -377,29 +392,32 @@ class YoloxConfig:
 
     def get_optimizer(self, batch_size):
         if "optimizer" not in self.__dict__:
-            if self.warmup_epochs > 0:
+            from yolox.utils.optimizers import build_yolox_optimizer
+
+            if getattr(self, "model", None) is None:
+                self.get_model()
+
+            if self.base_lr is not None:
+                lr = self.base_lr
+            elif self.warmup_epochs > 0:
                 lr = self.warmup_lr
             else:
                 lr = self.basic_lr_per_img * batch_size
 
-            pg0, pg1, pg2 = [], [], []  # optimizer parameter groups
+            # For AdamW, if weight decay was left at the SGD default (5e-4),
+            # adopt the canonical 0.05 decoupled weight decay (RTMDet / MMYOLO / D-FINE).
+            wd = self.weight_decay
+            if self.opt_type == "adamw" and wd == 5e-4:
+                wd = 0.05
 
-            for k, v in self.model.named_modules():
-                if hasattr(v, "bias") and isinstance(v.bias, nn.Parameter):
-                    pg2.append(v.bias)  # biases
-                if isinstance(v, nn.BatchNorm2d) or "bn" in k:
-                    pg0.append(v.weight)  # no decay
-                elif hasattr(v, "weight") and isinstance(v.weight, nn.Parameter):
-                    pg1.append(v.weight)  # apply decay
-
-            optimizer = torch.optim.SGD(
-                pg0, lr=lr, momentum=self.momentum, nesterov=True
+            self.optimizer = build_yolox_optimizer(
+                self.model,
+                optimizer_type=self.opt_type,
+                base_lr=lr,
+                backbone_lr_ratio=self.backbone_lr_ratio,
+                momentum=self.momentum,
+                weight_decay=wd,
             )
-            optimizer.add_param_group(
-                {"params": pg1, "weight_decay": self.weight_decay}
-            )  # add pg1 with weight_decay
-            optimizer.add_param_group({"params": pg2})
-            self.optimizer = optimizer
 
         return self.optimizer
 
@@ -452,7 +470,7 @@ class YoloxConfig:
 
         return val_loader
 
-    def get_evaluator(self, batch_size, is_distributed, testdev=False, legacy=False):
+    def get_evaluator(self, batch_size, is_distributed, testdev=False, legacy=False, save_dir=None):
         from yolox.evaluators import CocoEvaluator
 
         return CocoEvaluator(
@@ -463,7 +481,7 @@ class YoloxConfig:
             nmsthre=self.nmsthre,
             num_classes=self.num_classes,
             testdev=testdev,
-            save_dir=self.output_dir,
+            save_dir=save_dir if save_dir is not None else self.output_dir,
         )
 
     def get_trainer(self, args):

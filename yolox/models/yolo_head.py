@@ -472,7 +472,7 @@ class YoloxHead(nn.Module):
         with torch.amp.autocast('cuda', enabled=False):
             cls_preds_ = (
                 cls_preds_.float().sigmoid_() * obj_preds_.float().sigmoid_()
-            ).sqrt()
+            ).sqrt().clamp_(0.0, 1.0)
             pair_wise_cls_loss = F.binary_cross_entropy(
                 cls_preds_.unsqueeze(0).repeat(num_gt, 1, 1),
                 gt_cls_per_image.unsqueeze(1).repeat(1, num_in_boxes_anchor, 1),

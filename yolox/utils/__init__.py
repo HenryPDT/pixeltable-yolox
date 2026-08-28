@@ -1,6 +1,7 @@
 # Copyright (c) Megvii Inc. All rights reserved.
 
 from .allreduce_norm import *
+from .auto_batch import auto_batch_size
 from .boxes import *
 from .checkpoint import load_ckpt, save_checkpoint
 from .compat import meshgrid
@@ -14,5 +15,6 @@ from .lr_scheduler import LRScheduler
 from .metric import *
 from .mlflow_logger import MlflowLogger
 from .model_utils import *
+from .optimizers import Adan, build_yolox_optimizer
 from .setup_env import *
 from .visualize import *

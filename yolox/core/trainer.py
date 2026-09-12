@@ -516,6 +516,37 @@ class Trainer:
         logger.info(f"  NMS IoU:    {self.evaluator.nmsthre:.2f}  (used during training)")
         logger.info("=" * 60)
 
+    @staticmethod
+    def _flatten_per_class_metrics(per_class_metrics):
+        """Flatten per-class AP/AP50/AR dicts into logger-ready {tag: value}.
+
+        Values stored on the evaluator are raw fractions in [0, 1], matching
+        the scale of the overall val/COCOAP50 and val/COCOAP50_95 scalars.
+        NaN/inf entries (e.g. classes with no GT) are skipped since loggers
+        cannot plot them.
+        """
+        tag_prefixes = {
+            "AP": "val/per_class_AP",
+            "AP50": "val/per_class_AP50",
+            "AR": "val/per_class_AR",
+        }
+        scalars = {}
+        for key, prefix in tag_prefixes.items():
+            class_values = (per_class_metrics or {}).get(key) or {}
+            for class_name, value in class_values.items():
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(value):
+                    continue
+                safe_name = str(class_name).strip().replace("/", "_")
+                safe_name = "_".join(safe_name.split())
+                if not safe_name:
+                    continue
+                scalars[f"{prefix}/{safe_name}"] = value
+        return scalars
+
     def before_epoch(self):
         self._accum_micro_steps = 0
         logger.info("---> start train epoch{}".format(self.epoch + 1))
@@ -749,14 +780,24 @@ class Trainer:
         self._last_decision_ap = decision_score
 
         if self.rank == 0:
+            per_class_metrics = getattr(self.evaluator, "_last_per_class_metrics", None) or {}
+            per_class_scalars = self._flatten_per_class_metrics(per_class_metrics)
+            overall_ar = getattr(self.evaluator, "_last_overall_AR", None)
+            overall_scalars = {}
+            if overall_ar is not None and math.isfinite(float(overall_ar)):
+                overall_scalars["val/COCOAR"] = float(overall_ar)
             if self.args.logger == "tensorboard":
                 self.tblogger.add_scalar("val/COCOAP50", ap50, self.epoch + 1)
                 self.tblogger.add_scalar("val/COCOAP50_95", ap50_95, self.epoch + 1)
+                for tag, value in {**overall_scalars, **per_class_scalars}.items():
+                    self.tblogger.add_scalar(tag, value, self.epoch + 1)
             if self.args.logger == "wandb":
                 self.wandb_logger.log_metrics({
                     "val/COCOAP50": ap50,
                     "val/COCOAP50_95": ap50_95,
                     "train/epoch": self.epoch + 1,
+                    **overall_scalars,
+                    **per_class_scalars,
                 })
                 self.wandb_logger.log_images(predictions)
             if self.args.logger == "mlflow":
@@ -765,6 +806,8 @@ class Trainer:
                     "val/COCOAP50_95": ap50_95,
                     "val/best_ap": round(self.best_ap, 3),
                     "train/epoch": self.epoch + 1,
+                    **overall_scalars,
+                    **per_class_scalars,
                 }
                 self.mlflow_logger.on_log(self.args, self.exp, self.epoch+1, logs)
             if summary:

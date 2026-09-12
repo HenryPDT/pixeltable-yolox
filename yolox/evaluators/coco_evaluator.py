@@ -26,7 +26,8 @@ from yolox.utils import (
 )
 
 
-def per_class_AR_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "AR"], colums=6):
+def get_per_class_AR(coco_eval, class_names=COCO_CLASSES):
+    """Per-class AR (maxDets=100, all areas) as raw fractions in [0, 1]."""
     per_class_AR = {}
     recalls = coco_eval.eval["recall"]
     # dimension of recalls: [TxKxAxM]
@@ -37,7 +38,14 @@ def per_class_AR_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "A
         recall = recalls[:, idx, 0, -1]
         recall = recall[recall > -1]
         ar = np.mean(recall) if recall.size else float("nan")
-        per_class_AR[name] = float(ar * 100)
+        per_class_AR[name] = float(ar)
+    return per_class_AR
+
+
+def per_class_AR_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "AR"], colums=6):
+    per_class_AR = {
+        name: float(ar * 100) for name, ar in get_per_class_AR(coco_eval, class_names).items()
+    }
 
     num_cols = min(colums, len(per_class_AR) * len(headers))
     result_pair = [x for pair in per_class_AR.items() for x in pair]
@@ -49,7 +57,8 @@ def per_class_AR_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "A
     return table
 
 
-def per_class_AP_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "AP"], colums=6):
+def get_per_class_AP(coco_eval, class_names=COCO_CLASSES):
+    """Per-class AP @ IoU=0.50:0.95 as raw fractions in [0, 1]."""
     per_class_AP = {}
     precisions = coco_eval.eval["precision"]
     # dimension of precisions: [TxRxKxAxM]
@@ -62,7 +71,14 @@ def per_class_AP_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "A
         precision = precisions[:, :, idx, 0, -1]
         precision = precision[precision > -1]
         ap = np.mean(precision) if precision.size else float("nan")
-        per_class_AP[name] = float(ap * 100)
+        per_class_AP[name] = float(ap)
+    return per_class_AP
+
+
+def per_class_AP_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "AP"], colums=6):
+    per_class_AP = {
+        name: float(ap * 100) for name, ap in get_per_class_AP(coco_eval, class_names).items()
+    }
 
     num_cols = min(colums, len(per_class_AP) * len(headers))
     result_pair = [x for pair in per_class_AP.items() for x in pair]
@@ -74,8 +90,8 @@ def per_class_AP_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "A
     return table
 
 
-def per_class_AP50_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "AP50"], colums=6):
-    """Per-class AP at IoU=0.50 specifically (index 0 in the IoU dimension)."""
+def get_per_class_AP50(coco_eval, class_names=COCO_CLASSES):
+    """Per-class AP at IoU=0.50 specifically, as raw fractions in [0, 1]."""
     per_class_AP50 = {}
     precisions = coco_eval.eval["precision"]
     # dimension of precisions: [TxRxKxAxM]
@@ -89,7 +105,15 @@ def per_class_AP50_table(coco_eval, class_names=COCO_CLASSES, headers=["class", 
         precision = precisions[0, :, idx, 0, -1]
         precision = precision[precision > -1]
         ap50 = np.mean(precision) if precision.size else float("nan")
-        per_class_AP50[name] = float(ap50 * 100)
+        per_class_AP50[name] = float(ap50)
+    return per_class_AP50
+
+
+def per_class_AP50_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "AP50"], colums=6):
+    """Per-class AP at IoU=0.50 specifically (index 0 in the IoU dimension)."""
+    per_class_AP50 = {
+        name: float(ap50 * 100) for name, ap50 in get_per_class_AP50(coco_eval, class_names).items()
+    }
 
     num_cols = min(colums, len(per_class_AP50) * len(headers))
     result_pair = [x for pair in per_class_AP50.items() for x in pair]
@@ -141,6 +165,8 @@ class CocoEvaluator:
         self.per_class_AR = per_class_AR
         self.save_dir = save_dir
         self._last_threshold_result = None
+        self._last_per_class_metrics = None
+        self._last_overall_AR = None
 
     def evaluate(
         self, model, distributed=False, half=False, trt_file=None,
@@ -286,6 +312,8 @@ class CocoEvaluator:
             return 0, 0, None
 
         self._last_threshold_result = None
+        self._last_per_class_metrics = None
+        self._last_overall_AR = None
         logger.info("Evaluate in main process...")
 
         annType = ["segm", "bbox", "keypoints"]
@@ -334,8 +362,20 @@ class CocoEvaluator:
             with contextlib.redirect_stdout(redirect_string):
                 cocoEval.summarize()
             info += redirect_string.getvalue()
+            # stats[8] = AR @ IoU=0.50:0.95, all areas, maxDets=100,
+            # matching the per-class AR definition below.
+            self._last_overall_AR = float(cocoEval.stats[8])
             cat_ids = list(cocoGt.cats.keys())
             cat_names = [cocoGt.cats[catId]['name'] for catId in sorted(cat_ids)]
+            try:
+                self._last_per_class_metrics = {
+                    "AP": get_per_class_AP(cocoEval, class_names=cat_names),
+                    "AP50": get_per_class_AP50(cocoEval, class_names=cat_names),
+                    "AR": get_per_class_AR(cocoEval, class_names=cat_names),
+                }
+            except Exception as e:
+                logger.warning(f"Per-class metric computation failed: {e}")
+                self._last_per_class_metrics = None
             if self.per_class_AP:
                 AP_table = per_class_AP_table(cocoEval, class_names=cat_names)
                 info += "per class AP (50:95):\n" + AP_table + "\n"
